@@ -1,0 +1,25 @@
+[package]
+name = "curtana"
+categories = [
+]
+keywords = [
+]
+readme = "../README.md"
+version = "0.0.1"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[package.metadata.release]
+release = true
+
+[package.metadata.docs.rs]
+# Generate documentation with all features enabled
+all-features = true
+
+[dependencies]
+lazy_static = "1.5.0"
+
+# LLM inference.
+llama-cpp-2 = { version = "0.1.107", features = [] }

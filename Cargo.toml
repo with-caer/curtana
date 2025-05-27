@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [ 
+    "curtana",
+]
+
+# Common configuration properties that
+# can be inherited by workspace members.
+[workspace.package]
+edition = "2024"
+repository = "https://github.com/with-caer/curtana"
+license = "MIT"
+authors = [
+    "With Caer, LLC <with@caer.cc>",
+]
+
+[workspace.dependencies]
+
+[profile.dev]
+# Use release optimizations during testing to
+# speed up ML-based tests.
+opt-level = 3
