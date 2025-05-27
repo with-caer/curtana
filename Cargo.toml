@@ -14,8 +14,6 @@ authors = [
     "With Caer, LLC <with@caer.cc>",
 ]
 
-[workspace.dependencies]
-
 [profile.dev]
 # Use release optimizations during testing to
 # speed up ML-based tests.

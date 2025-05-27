@@ -1,8 +1,15 @@
 [package]
 name = "curtana"
+description = "Simplified zero-cost wrapper over llama.cpp powered by lama-cpp-2."
 categories = [
+    "api-bindings",
+    "text-processing",
 ]
 keywords = [
+    "llama",
+    "llm",
+    "embedding",
+    "inference",
 ]
 readme = "../README.md"
 version = "0.0.1"
@@ -18,8 +25,16 @@ release = true
 # Generate documentation with all features enabled
 all-features = true
 
+[features]
+
+# Mutually-exclusive features which enable
+# diferent CPU/GPU backends for the Llama APIs.
+cuda = ["llama-cpp-2/cuda"]
+metal = ["llama-cpp-2/metal"]
+openmp = ["llama-cpp-2/openmp"]
+
 [dependencies]
 lazy_static = "1.5.0"
 
 # LLM inference.
-llama-cpp-2 = { version = "0.1.107", features = [] }
+llama-cpp-2 = { version = "0.1.107", default-features = false, features = [] }
