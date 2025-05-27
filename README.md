@@ -1,5 +1,5 @@
-[![`curtana` on crates.io](https://img.shields.io/crates/v/curtana)](https://crates.io/crates/curtana)
-[![`curtana` on docs.rs](https://img.shields.io/docsrs/curtana)](https://docs.rs/curtana/)
+<!-- [![`curtana` on crates.io](https://img.shields.io/crates/v/curtana)](https://crates.io/crates/curtana) -->
+<!-- [![`curtana` on docs.rs](https://img.shields.io/docsrs/curtana)](https://docs.rs/curtana/) -->
 [![`curtana` is MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/with-caer/curtana/blob/main/LICENSE.txt)
 
 Simplified, low-overhead wrapper over [`llama.cpp`](https://github.com/ggml-org/llama.cpp)
