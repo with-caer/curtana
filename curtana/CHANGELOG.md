@@ -1,5 +1,11 @@
 This file contains a chronological list of all major changes made to this crate.
 
+## Unreleased Changes
+
+### 🛡️ Operations
+
+- Update llama-cpp-2 version
+
 ## [0.0.2] - 2025-05-27
 
 ### 🚀 Features

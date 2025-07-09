@@ -47,7 +47,7 @@ impl ModelRegistry {
     pub fn new() -> Result<Self, Error> {
         lazy_static::lazy_static! {
             static ref LLAMA_BACKEND: Arc<LlamaBackend> = {
-                send_logs_to_tracing(LogOptions::default().with_logs_enabled(true));
+                send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
                 Arc::new(LlamaBackend::init().unwrap())
             };
         }
