@@ -1,5 +1,11 @@
 This file contains a chronological list of all major changes made to this crate.
 
+## Unreleased Changes
+
+### 🐛 Fixes
+
+- Disable using all feature for docs-rs builds
+
 ## [0.1.0] - 2025-07-10
 
 ### 🛡️ Operations

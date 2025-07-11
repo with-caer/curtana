@@ -23,7 +23,7 @@ release = true
 
 [package.metadata.docs.rs]
 # Generate documentation with all features enabled
-all-features = true
+features = []
 
 [features]
 
