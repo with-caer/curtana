@@ -1,6 +1,6 @@
 This file contains a chronological list of all major changes made to this crate.
 
-## Unreleased Changes
+## [0.1.1] - 2025-07-11
 
 ### 🐛 Fixes
 
