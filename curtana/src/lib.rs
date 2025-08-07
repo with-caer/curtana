@@ -16,6 +16,11 @@ use llama_cpp_2::{
     },
     sampling::LlamaSampler,
     send_logs_to_tracing,
+    token::LlamaToken,
+};
+use openai_harmony::{
+    HarmonyEncodingName,
+    chat::{Conversation, Message, Role},
 };
 
 /// Model context length (in tokens) used during inference.
@@ -47,7 +52,7 @@ impl ModelRegistry {
     pub fn new() -> Result<Self, Error> {
         lazy_static::lazy_static! {
             static ref LLAMA_BACKEND: Arc<LlamaBackend> = {
-                send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+                // send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
                 Arc::new(LlamaBackend::init().unwrap())
             };
         }
@@ -72,10 +77,7 @@ impl ModelRegistry {
             registry: self.clone(),
             model,
             chat_template,
-            messages: vec![LlamaChatMessage::new(
-                "system".to_string(),
-                system_prompt.to_string(),
-            )?],
+            messages: vec![("system".to_string(), system_prompt.to_string())],
         })
     }
 
@@ -96,7 +98,7 @@ pub struct ChatModel {
     registry: ModelRegistry,
     model: LlamaModel,
     chat_template: LlamaChatTemplate,
-    messages: Vec<LlamaChatMessage>,
+    messages: Vec<(String, String)>,
 }
 
 impl ChatModel {
@@ -115,16 +117,11 @@ impl ChatModel {
         let inference = String::from_utf8(inference).unwrap();
 
         // Record input prompt in the chat history.
-        self.messages.push(LlamaChatMessage::new(
-            "user".to_string(),
-            prompt.to_string(),
-        )?);
+        self.messages.push(("user".to_string(), prompt.to_string()));
 
         // Record model's inference in the chat history.
-        self.messages.push(LlamaChatMessage::new(
-            "assistant".to_string(),
-            inference.clone(),
-        )?);
+        self.messages
+            .push(("assistant".to_string(), inference.clone()));
 
         // Write a copy of the output to `output`.
         //
@@ -140,16 +137,60 @@ impl ChatModel {
     /// writing the model's output to `output`.
     pub fn infer(&mut self, prompt: &str, output: &mut impl Write) -> Result<(), Error> {
         // Update messages with the new prompt.
-        self.messages.push(LlamaChatMessage::new(
-            "user".to_string(),
-            prompt.to_string(),
-        )?);
+        self.messages.push(("user".to_string(), prompt.to_string()));
 
-        // Format and tokenize the prompt.
-        let prompt = self
-            .model
-            .apply_chat_template(&self.chat_template, &self.messages, true)?;
-        let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
+        const GPT_OSS: bool = true;
+
+        let tokens = if GPT_OSS {
+            let enc =
+                openai_harmony::load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss).unwrap();
+            let mut messages = Vec::with_capacity(self.messages.len());
+
+            for (role, message) in &self.messages {
+                match role.to_ascii_lowercase().as_str() {
+                    "system" => {
+                        messages.push(Message::from_role_and_content(
+                            Role::System,
+                            message.to_owned(),
+                        ));
+                    }
+
+                    "user" => {
+                        messages.push(Message::from_role_and_content(
+                            Role::User,
+                            message.to_owned(),
+                        ));
+                    }
+
+                    "assistant" => {
+                        messages.push(Message::from_role_and_content(
+                            Role::Assistant,
+                            message.to_owned(),
+                        ));
+                    }
+
+                    _ => unimplemented!(),
+                }
+            }
+
+            let conversation = Conversation::from_messages(messages);
+            let tokens = enc
+                .render_conversation_for_completion(&conversation, Role::Assistant, None)
+                .unwrap();
+            tokens
+                .into_iter()
+                .map(|t| LlamaToken::new(t.try_into().unwrap()))
+                .collect()
+        } else {
+            let mut messages = Vec::with_capacity(self.messages.len());
+            for (role, message) in &self.messages {
+                messages.push(LlamaChatMessage::new(role.to_owned(), message.to_owned())?);
+            }
+            let prompt = self
+                .model
+                .apply_chat_template(&self.chat_template, &messages, true)?;
+            self.model.str_to_token(&prompt, AddBos::Always)?
+        };
 
         // Prepare inference context.
         let context_params = LlamaContextParams::default()
@@ -394,9 +435,17 @@ impl From<std::io::Error> for Error {
 mod tests {
     use super::*;
 
-    /// From: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
-    ///       wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q6_K.gguf
-    const CHAT_MODEL: &str = "../Llama-3.2-3B-Instruct-Q6_K.gguf";
+    /// From: https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF
+    ///       wget https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF/resolve/main/openai_gpt-oss-20b-Q4_K_M.gguf
+    const CHAT_MODEL: &str = "../openai_gpt-oss-20b-Q4_K_M.gguf";
+
+    // /// From: https://huggingface.co/unsloth/gpt-oss-20b-GGUF
+    // ///       wget https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-Q6_K.gguf
+    // const CHAT_MODEL: &str = "../gpt-oss-20b-Q6_K.gguf";
+
+    // /// From: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+    // ///       wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q6_K.gguf
+    // const CHAT_MODEL: &str = "../Llama-3.2-3B-Instruct-Q6_K.gguf";
 
     /// From: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF
     ///       wget https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf

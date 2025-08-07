@@ -1,5 +1,11 @@
 This file contains a chronological list of all major changes made to this crate.
 
+## Unreleased Changes
+
+### 🚀 Features
+
+- Add unstable support for gpt-oss and harmony prompts
+
 ## [0.1.1] - 2025-07-11
 
 ### 🐛 Fixes
