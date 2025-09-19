@@ -139,7 +139,7 @@ impl ChatModel {
         // Update messages with the new prompt.
         self.messages.push(("user".to_string(), prompt.to_string()));
 
-        const GPT_OSS: bool = true;
+        const GPT_OSS: bool = false;
 
         let tokens = if GPT_OSS {
             let enc =
@@ -437,7 +437,7 @@ mod tests {
 
     /// From: https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF
     ///       wget https://huggingface.co/bartowski/openai_gpt-oss-20b-GGUF/resolve/main/openai_gpt-oss-20b-Q4_K_M.gguf
-    const CHAT_MODEL: &str = "../openai_gpt-oss-20b-Q4_K_M.gguf";
+    // const CHAT_MODEL: &str = "../openai_gpt-oss-20b-Q4_K_M.gguf";
 
     // /// From: https://huggingface.co/unsloth/gpt-oss-20b-GGUF
     // ///       wget https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-Q6_K.gguf
@@ -445,7 +445,7 @@ mod tests {
 
     // /// From: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
     // ///       wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q6_K.gguf
-    // const CHAT_MODEL: &str = "../Llama-3.2-3B-Instruct-Q6_K.gguf";
+    const CHAT_MODEL: &str = "../Llama-3.2-3B-Instruct-Q6_K.gguf";
 
     /// From: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF
     ///       wget https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf
