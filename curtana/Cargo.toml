@@ -12,7 +12,7 @@ keywords = [
     "inference",
 ]
 readme = "../README.md"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
