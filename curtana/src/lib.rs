@@ -238,6 +238,7 @@ impl TextEmbeddingModel {
             .get() as i32;
         let context_params = LlamaContextParams::default()
             .with_n_batch(DEFAULT_CONTEXT_LENGTH as u32)
+            .with_n_ubatch(DEFAULT_CONTEXT_LENGTH as u32)
             .with_n_ctx(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH as u32))
             .with_n_threads(thread_count)
             .with_n_threads_batch(thread_count)
@@ -247,15 +248,24 @@ impl TextEmbeddingModel {
             .new_context(&self.registry.backend, context_params)?;
 
         // Make sure the KV cache is big enough to hold all the text.
-        let n_cxt = context.n_ctx() as usize;
+        let n_ctx = context.n_ctx() as usize;
+        let n_ubatch = context.n_ubatch() as usize;
         for tokens in &tokens {
-            if n_cxt < tokens.len() {
-                panic!("embedded text exceeds maximum context size")
+            if n_ctx < tokens.len() {
+                return Err(Error::ContextSize {
+                    maximum: n_ubatch,
+                    actual: tokens.len(),
+                });
+            } else if n_ubatch < tokens.len() {
+                return Err(Error::MicrobatchSize {
+                    maximum: n_ubatch,
+                    actual: tokens.len(),
+                });
             }
         }
 
         // Prepare a reusable batch.
-        let mut batch = LlamaBatch::new(n_cxt, 1);
+        let mut batch = LlamaBatch::new(n_ctx, 1);
 
         // TODO: @caer: include multiple tokens per batch if possible.
         // Embed batches.
@@ -311,9 +321,25 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     dot / (dot_a * dot_b).sqrt()
 }
 
-/// Error that occurs when working with a [Model].
-#[derive(Debug, Clone)]
+/// Error that occurs when working with a model.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    TextTooLong(&'static str),
+
+    /// An input was too large for the configured
+    /// context size.
+    ContextSize {
+        maximum: usize,
+        actual: usize,
+    },
+
+    /// An input was too large for the configured
+    /// microbatch size.
+    MicrobatchSize {
+        maximum: usize,
+        actual: usize,
+    },
+
     InternalNativeError(String),
     IoError(String),
 }
@@ -417,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn embeddings() {
+    fn embeds_text() {
         let registry = ModelRegistry::new().unwrap();
         let mut model = registry
             .load_text_embedding_model(TEXT_EMBEDDING_MODEL)
@@ -440,5 +466,30 @@ mod tests {
 
         assert!(distance_a < distance_c);
         assert!(distance_b < distance_c);
+    }
+
+    #[test]
+    fn embeddings_reject_large_texts() {
+        let registry = ModelRegistry::new().unwrap();
+        let mut model = registry
+            .load_text_embedding_model(TEXT_EMBEDDING_MODEL)
+            .unwrap();
+
+        // Create a string which should tokenize into a size
+        // much greater than the supported microbatch size.
+        let mut text = String::from("search document:");
+        while text.len() < DEFAULT_CONTEXT_LENGTH * 8 {
+            text.push_str(" might and magic in fantasy realms and");
+        }
+
+        let embedding = model.embed(&[text]);
+
+        assert_eq!(
+            Err(Error::ContextSize {
+                maximum: DEFAULT_CONTEXT_LENGTH,
+                actual: 24148
+            }),
+            embedding
+        );
     }
 }
