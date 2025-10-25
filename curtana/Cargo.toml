@@ -31,6 +31,7 @@ features = []
 # diferent CPU/GPU backends for the Llama APIs.
 cuda = ["llama-cpp-2/cuda"]
 metal = ["llama-cpp-2/metal"]
+vulkan = ["llama-cpp-2/vulkan"]
 openmp = ["llama-cpp-2/openmp"]
 
 [dependencies]
