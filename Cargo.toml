@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
-members = [ 
-    "curtana",
+members = [
+    "crates/curtana-infers",
+    "crates/curtana-reads",
+    "crates/curtana-knows",
 ]
 
 # Common configuration properties that
@@ -9,10 +11,17 @@ members = [
 [workspace.package]
 edition = "2024"
 repository = "https://github.com/withcaer/curtana"
-license = "MIT"
+license = "FSL-1.1-MIT"
 authors = [
     "With Caer, LLC <with@caer.cc>",
 ]
+
+[workspace.dependencies]
+curtana-infers = { path = "crates/curtana-infers" }
+curtana-reads = { path = "crates/curtana-reads" }
+curtana-knows = { path = "crates/curtana-knows" }
+tokio = { version = "1.49.0", features = ["full"] }
+serde = "1.0.228"
 
 [profile.dev]
 # Use release optimizations during testing to

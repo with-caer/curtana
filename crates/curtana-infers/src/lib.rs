@@ -422,19 +422,19 @@ mod tests {
 
     /// From: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
     ///       wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q6_K.gguf
-    const CHAT_MODEL: &str = "../Llama-3.2-3B-Instruct-Q6_K.gguf";
+    const CHAT_MODEL: &str = "../../Llama-3.2-3B-Instruct-Q6_K.gguf";
 
     /// From: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF
     ///       wget https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf
-    const TEXT_EMBEDDING_MODEL: &str = "../nomic-embed-text-v1.5.f16.gguf";
+    const TEXT_EMBEDDING_MODEL: &str = "../../nomic-embed-text-v1.5.f16.gguf";
 
     // From: https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF
     //.      wget https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/main/embeddinggemma-300M-qat-Q4_0.gguf
-    // const TEXT_EMBEDDING_MODEL: &str = "../embeddinggemma-300M-qat-Q4_0.gguf";
+    // const TEXT_EMBEDDING_MODEL: &str = "../../embeddinggemma-300M-qat-Q4_0.gguf";
 
     // From: https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
     //       wget https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
-    // const TEXT_EMBEDDING_MODEL: &str = "../all-MiniLM-L6-v2-ggml-model-f16.gguf";
+    // const TEXT_EMBEDDING_MODEL: &str = "../../all-MiniLM-L6-v2-ggml-model-f16.gguf";
 
     #[test]
     fn chat() {
