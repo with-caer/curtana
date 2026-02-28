@@ -602,9 +602,9 @@ dependencies = [
 
 [[package]]
 name = "codas"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "912c494a3e8600497829b316b06b4f19862637dde182734aabb99554280b9b70"
+checksum = "21ef988d587d8662a87d1f4bcf56ae4ea1b41ff03d892a45d3bafa7a82eedc87"
 dependencies = [
  "argon2",
  "blake3",
@@ -619,9 +619,9 @@ dependencies = [
 
 [[package]]
 name = "codas-flow"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd8c4dad914042344ce067214b3fe27ed40cdff2e4afbd402a3d7bfff1f5e23a"
+checksum = "e78f7cd8b056b7136786cca0c8a57751cec023077e7aa5d1d09da621ca896ac5"
 dependencies = [
  "codas",
  "portable-atomic",
@@ -631,9 +631,9 @@ dependencies = [
 
 [[package]]
 name = "codas-macros"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f8a015fdb52ae59950fbaeb48737ff7588e71e24d4aba4bedecff57a803e3e3"
+checksum = "cd563c70ca6dd2f4f10d9e97a680dbd3e59cfd70e49f9589e421517b2cb059ce"
 dependencies = [
  "codas",
 ]
@@ -957,7 +957,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2240,7 +2240,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2509,7 +2509,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2922,7 +2922,7 @@ dependencies = [
  "getrandom 0.3.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

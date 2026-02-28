@@ -7,7 +7,7 @@ Your AI concierge.
 | Crate | Description |
 |-------|-------------|
 | [`curtana-reads`](crates/curtana-reads) | Tools for reading from external data sources (iMessage, IMAP email). |
-| [`curtana-knows`](crates/curtana-knows) | Persistent knowledge storage, embedding, and retrieval backed by DuckDB. |
+| [`curtana-knows`](crates/curtana-knows) | Persistent knowledge storage, embedding, and retrieval. |
 | [`curtana-infers`](crates/curtana-infers) | Low-overhead local LLM inference via [`llama.cpp`](https://github.com/ggml-org/llama.cpp), supporting most `.gguf`-formatted chat and embedding models. |
 
 ## License

@@ -1,9 +1,8 @@
 use async_native_tls::TlsConnector;
 use futures::TryStreamExt;
 use mail_parser::MessageParser;
+use serde::Deserialize;
 use tokio::net::TcpStream;
-
-use crate::ImapConfig;
 
 pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
     // Establish a TCP connection.
@@ -84,4 +83,12 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
     session.logout().await.unwrap();
 
     messages
+}
+
+#[derive(Deserialize)]
+pub struct ImapConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
 }

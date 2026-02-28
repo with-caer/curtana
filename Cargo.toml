@@ -21,7 +21,7 @@ curtana-infers = { path = "crates/curtana-infers" }
 curtana-reads = { path = "crates/curtana-reads" }
 curtana-knows = { path = "crates/curtana-knows" }
 tokio = { version = "1.49.0", features = ["full"] }
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 
 [profile.dev]
 # Use release optimizations during testing to

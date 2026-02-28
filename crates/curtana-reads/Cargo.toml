@@ -1,6 +1,6 @@
 [package]
 name = "curtana-reads"
-description = "Tools for reading from external data sources."
+description = "Knowledge extraction and reading tools."
 version = "0.1.0"
 edition.workspace = true
 repository.workspace = true

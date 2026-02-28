@@ -1,6 +1,6 @@
 [package]
 name = "curtana-knows"
-description = "Persistent knowledge storage, embedding, and retrieval."
+description = "Knowledge embedding, storage, and retrieval tools."
 version = "0.1.0"
 edition.workspace = true
 repository.workspace = true
@@ -9,9 +9,9 @@ authors.workspace = true
 
 [dependencies]
 # Data encoding.
-codas = { version = "0.5.1", features = ["serde"] }
-codas-flow = "0.5.1"
-codas-macros = { version = "0.5.1", features = ["serde"] }
+codas = { version = "0.6.0", features = ["serde"] }
+codas-flow = "0.6.0"
+codas-macros = { version = "0.6.0", features = ["serde"] }
 
 # Persistence.
 duckdb = { version = "1.2.2", features = ["bundled"] }
