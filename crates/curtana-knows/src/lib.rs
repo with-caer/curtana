@@ -99,7 +99,9 @@ impl Store {
         let unembedded: Vec<(String, Artifact)> = tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = connection.prepare("SELECT id, data FROM artifacts").unwrap();
+            let mut statement = connection
+                .prepare("SELECT id, data FROM artifacts")
+                .unwrap();
             let rows = statement
                 .query_map([], |row| {
                     let id: String = row.get(0).unwrap();
@@ -156,7 +158,9 @@ impl Store {
         let embedded: Vec<(String, Artifact)> = tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = connection.prepare("SELECT id, data FROM artifacts").unwrap();
+            let mut statement = connection
+                .prepare("SELECT id, data FROM artifacts")
+                .unwrap();
             let rows = statement
                 .query_map([], |row| {
                     let id: String = row.get(0).unwrap();
@@ -186,7 +190,7 @@ impl Store {
         .unwrap();
 
         // Embed the query.
-        let query_embedding = model.embed(&[format!("{}", query)]).unwrap().pop().unwrap();
+        let query_embedding = model.embed(&[query]).unwrap().pop().unwrap();
 
         // Calculate cosines and rank artifacts by similarity.
         let mut artifacts: Vec<_> = embedded
@@ -206,7 +210,10 @@ impl Store {
 
         // Truncate to top-k.
         artifacts.truncate(top_k);
-        artifacts.into_iter().map(|(_, _, artifact)| artifact).collect()
+        artifacts
+            .into_iter()
+            .map(|(_, _, artifact)| artifact)
+            .collect()
     }
 }
 

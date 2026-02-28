@@ -4,7 +4,20 @@ use mail_parser::MessageParser;
 use serde::Deserialize;
 use tokio::net::TcpStream;
 
-pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
+pub struct EmailMessage {
+    /// Value of the `Message-ID` header.
+    pub message_id: String,
+    /// Sender email address from the `From` header.
+    pub from: String,
+    /// Message date as Unix epoch seconds.
+    pub timestamp: i64,
+    /// Subject line.
+    pub subject: String,
+    /// Concatenated text body parts.
+    pub body: String,
+}
+
+pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
     // Establish a TCP connection.
     let tcp_stream = TcpStream::connect((config.host.clone(), config.port))
         .await
@@ -36,11 +49,11 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
         .unwrap();
 
     // Request access to the inbox.
-    session.select("INBOX").await.unwrap();
+    session.select(&config.mailbox).await.unwrap();
 
-    // Fetch message number 1 in this mailbox, along with its RFC822 field.
+    // Fetch messages in this mailbox, along with their RFC822 field.
     // RFC 822 dictates the format of the body of e-mails
-    let messages_stream = session.fetch("1:*", "RFC822").await.unwrap();
+    let messages_stream = session.fetch(&config.sequence, "RFC822").await.unwrap();
     let messages: Vec<_> = messages_stream.try_collect().await.unwrap();
 
     // Parse messages.
@@ -60,13 +73,21 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
         a.cmp(b).reverse()
     });
 
-    // Extract message headers and bodies.
+    // Extract message metadata and bodies.
     let messages: Vec<_> = messages
         .into_iter()
         .map(|m| {
-            let subject = m.subject().unwrap();
-            let mut body = String::new();
+            let message_id = m.message_id().unwrap().to_owned();
+            let from = m
+                .from()
+                .and_then(|a| a.first())
+                .and_then(|a| a.address())
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            let timestamp = m.date().unwrap().to_timestamp();
+            let subject = m.subject().unwrap().to_owned();
 
+            let mut body = String::new();
             let text_bodies = m.text_body_count();
             for i in 0..text_bodies {
                 let body_text = &m.body_text(i).unwrap();
@@ -75,7 +96,13 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
                 }
             }
 
-            (subject.to_owned(), body)
+            EmailMessage {
+                message_id,
+                from,
+                timestamp,
+                subject,
+                body,
+            }
         })
         .collect();
 
@@ -87,8 +114,16 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<(String, String)> {
 
 #[derive(Deserialize)]
 pub struct ImapConfig {
+    /// IMAP server hostname.
     pub host: String,
+    /// IMAP server port (typically 143 for STARTTLS).
     pub port: u16,
+    /// Login username.
     pub username: String,
+    /// Login password.
     pub password: String,
+    /// Mailbox to select, e.g. `"INBOX"`, `"[Gmail]/All Mail"`.
+    pub mailbox: String,
+    /// IMAP sequence set to fetch, e.g. `"1:*"`, `"1:50"`.
+    pub sequence: String,
 }
