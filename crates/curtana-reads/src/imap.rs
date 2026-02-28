@@ -1,8 +1,11 @@
 use async_native_tls::TlsConnector;
+use chrono::DateTime;
 use futures::TryStreamExt;
 use mail_parser::MessageParser;
 use serde::Deserialize;
 use tokio::net::TcpStream;
+
+use crate::ToMarkdown;
 
 pub struct EmailMessage {
     /// Value of the `Message-ID` header.
@@ -87,14 +90,26 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
             let timestamp = m.date().unwrap().to_timestamp();
             let subject = m.subject().unwrap().to_owned();
 
-            let mut body = String::new();
-            let text_bodies = m.text_body_count();
-            for i in 0..text_bodies {
-                let body_text = &m.body_text(i).unwrap();
-                if !body_text.is_empty() {
-                    body.push_str(body_text.trim());
+            let body = if m.html_body_count() > 0 {
+                let mut html = String::new();
+                for i in 0..m.html_body_count() {
+                    if let Some(part) = m.body_html(i) {
+                        html.push_str(&part);
+                    }
                 }
-            }
+                htmd::convert(&html).unwrap_or(html)
+            } else {
+                let mut text = String::new();
+                for i in 0..m.text_body_count() {
+                    if let Some(part) = m.body_text(i) {
+                        let trimmed = part.trim();
+                        if !trimmed.is_empty() {
+                            text.push_str(trimmed);
+                        }
+                    }
+                }
+                text
+            };
 
             EmailMessage {
                 message_id,
@@ -110,6 +125,19 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
     session.logout().await.unwrap();
 
     messages
+}
+
+impl ToMarkdown for EmailMessage {
+    fn to_markdown(&self) -> String {
+        let date = DateTime::from_timestamp(self.timestamp, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+
+        format!(
+            "# {}\n\n**From:** {}\n**Date:** {}\n\n{}",
+            self.subject, self.from, date, self.body
+        )
+    }
 }
 
 #[derive(Deserialize)]

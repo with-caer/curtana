@@ -14,6 +14,10 @@ async-native-tls = { version = "0.5.0", default-features = false, features = ["r
 futures = "0.3.31"
 mail-parser = "0.11.0"
 
+# Markdown normalization.
+htmd = "0.1"
+chrono = "0.4"
+
 # Async runtime.
 tokio = { workspace = true }
 

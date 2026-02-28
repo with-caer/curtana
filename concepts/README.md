@@ -19,3 +19,7 @@ This concierge breaks the trifecta by eliminating the ability to take action. It
 1. A self-hostable, read-only agent that runs local LLM inference and RAG, but has no ability to take actions.
 2. An external gateway that can receive action proposals from the agent, presenting them for human review.
 3. An execution service that can execute approved actions, but has no agentic functionality.
+
+### Normalizes Artifacts to Markdown
+
+The read-only agent normalizes all artifacts (e.g., emails and PDFs) to Markdown text, which can then be content-aware chunked for embedding into a local vector index.
