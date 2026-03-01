@@ -51,19 +51,46 @@ fn handle_key(
     modifiers: KeyModifiers,
     cmd_tx: &mpsc::UnboundedSender<CommandRequest>,
 ) {
+    let completing = app.completion.is_some();
+
     match code {
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             app.running = false;
         }
         KeyCode::Char(c) => {
             app.insert_char(c);
+            app.update_completion();
         }
         KeyCode::Backspace => {
             app.delete_char();
+            app.update_completion();
+        }
+        KeyCode::Tab if completing => {
+            app.accept_completion();
+        }
+        KeyCode::Esc if completing => {
+            app.completion = None;
+        }
+        KeyCode::Up if completing => {
+            if let Some(cs) = &mut app.completion {
+                if cs.selected == 0 {
+                    cs.selected = cs.matches.len() - 1;
+                } else {
+                    cs.selected -= 1;
+                }
+            }
+        }
+        KeyCode::Down if completing => {
+            if let Some(cs) = &mut app.completion {
+                cs.selected = (cs.selected + 1) % cs.matches.len();
+            }
         }
         KeyCode::Enter => {
             if matches!(app.status, AppStatus::Loading(_)) {
                 return;
+            }
+            if completing {
+                app.accept_completion();
             }
             let input = app.take_input();
             if input.is_empty() {

@@ -1,3 +1,4 @@
+use crate::commands::{CommandInfo, COMMANDS};
 use crate::event::SourceRef;
 use curtana_knows::manifest::TaxonomyEntry;
 
@@ -6,6 +7,12 @@ use curtana_knows::manifest::TaxonomyEntry;
 pub enum ActivePane {
     Chat,
     Detail,
+}
+
+/// Completion popup state for slash commands.
+pub struct CompletionState {
+    pub matches: Vec<&'static CommandInfo>,
+    pub selected: usize,
 }
 
 /// Application state for the TUI.
@@ -28,6 +35,8 @@ pub struct App {
     pub running: bool,
     /// Current status indicator.
     pub status: AppStatus,
+    /// Active command completion popup.
+    pub completion: Option<CompletionState>,
 }
 
 pub enum AppStatus {
@@ -91,6 +100,7 @@ impl App {
             active_pane: ActivePane::Chat,
             running: true,
             status: AppStatus::Idle,
+            completion: None,
         }
     }
 
@@ -108,6 +118,42 @@ impl App {
                 .unwrap_or(0);
             self.input.drain(prev..self.cursor_position);
             self.cursor_position = prev;
+        }
+    }
+
+    /// Recompute the completion popup based on current input.
+    pub fn update_completion(&mut self) {
+        // Only complete when input starts with `/` and has no whitespace (still typing command name).
+        let prefix = &self.input;
+        if prefix.starts_with('/') && !prefix.contains(char::is_whitespace) {
+            let matches: Vec<&'static CommandInfo> = COMMANDS
+                .iter()
+                .filter(|c| c.name.starts_with(prefix))
+                .collect();
+            if matches.is_empty() {
+                self.completion = None;
+            } else {
+                let prev_selected = self
+                    .completion
+                    .as_ref()
+                    .and_then(|cs| cs.matches.get(cs.selected).map(|m| m.name));
+                let selected = prev_selected
+                    .and_then(|name| matches.iter().position(|m| m.name == name))
+                    .unwrap_or(0);
+                self.completion = Some(CompletionState { matches, selected });
+            }
+        } else {
+            self.completion = None;
+        }
+    }
+
+    /// Accept the currently selected completion, replacing input with the command name.
+    pub fn accept_completion(&mut self) {
+        if let Some(cs) = self.completion.take() {
+            if let Some(cmd) = cs.matches.get(cs.selected) {
+                self.input = cmd.name.to_string();
+                self.cursor_position = self.input.len();
+            }
         }
     }
 

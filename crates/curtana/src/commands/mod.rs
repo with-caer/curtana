@@ -12,6 +12,21 @@ use crate::event::Event;
 
 use curtana_infers::{ChatModel, ModelRegistry, TextEmbeddingModel};
 
+/// Metadata for a slash command (used by tab completion).
+pub struct CommandInfo {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// All slash commands, sorted alphabetically for the completion popup.
+pub const COMMANDS: &[CommandInfo] = &[
+    CommandInfo { name: "/discover", description: "Discover source folders" },
+    CommandInfo { name: "/help",     description: "Show help" },
+    CommandInfo { name: "/ingest",   description: "Ingest artifacts" },
+    CommandInfo { name: "/quit",     description: "Exit curtana" },
+    CommandInfo { name: "/status",   description: "Show tracked taxonomies" },
+];
+
 /// Parsed user command.
 pub enum Command {
     Query(String),
