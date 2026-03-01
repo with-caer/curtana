@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::markdown;
-use crate::app::{App, Role};
+use crate::app::{ActivePane, App, Role};
 
 /// Renders the scrollable chat message history.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
@@ -56,9 +56,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    let focused = app.active_pane == ActivePane::Chat || app.detail_panel.is_none();
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(border_color));
     let inner_width = area.width.saturating_sub(2);
     let inner_height = area.height.saturating_sub(2) as usize;
 

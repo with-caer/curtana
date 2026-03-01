@@ -16,9 +16,9 @@ Available commands:
 
 Keyboard shortcuts:
   Enter        Submit input
-  Tab          Toggle detail panel
-  Up/Down      Scroll chat
-  PgUp/PgDn    Scroll chat (fast)
+  Tab          Switch focus between chat and detail panel
+  Up/Down      Scroll focused pane
+  PgUp/PgDn    Scroll focused pane (fast)
   Ctrl+C       Exit";
 
 /// Processes an event and mutates application state.
@@ -160,15 +160,8 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
     match result {
         CommandResult::Query { sources } => {
             app.status = AppStatus::Idle;
-            let mut source_text = String::from("\n\n--- Sources ---");
-            for s in &sources {
-                source_text.push_str(&format!(
-                    "\n[{}] {:.4} | {} | {}",
-                    s.index, s.score, s.taxonomy, s.title,
-                ));
-            }
-            app.append_to_last_message(&source_text);
             app.detail_panel = Some(DetailView::Sources(sources));
+            app.detail_scroll_offset = 0;
         }
         CommandResult::Status { entries } => {
             app.status = AppStatus::Idle;
@@ -181,6 +174,7 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
             }
             app.add_message(Message::system(text));
             app.detail_panel = Some(DetailView::TaxonomyList(entries));
+            app.detail_scroll_offset = 0;
         }
         CommandResult::DiscoverFolders { folders } => {
             let mut text = String::from("Available folders:\n");

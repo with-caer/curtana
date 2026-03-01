@@ -4,13 +4,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DetailView};
+use crate::app::{ActivePane, App, DetailView};
 
 /// Renders the right-side detail panel.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = app.active_pane == ActivePane::Detail;
+    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             " Detail ",
             Style::default().add_modifier(Modifier::BOLD),
@@ -69,12 +72,21 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
         None => {
             vec![Line::from(Span::styled(
-                "Press Tab to toggle",
+                "No content",
                 Style::default().fg(Color::DarkGray),
             ))]
         }
     };
 
+    let inner_width = area.width.saturating_sub(2);
+    let inner_height = area.height.saturating_sub(2) as usize;
+
     let paragraph = Paragraph::new(content).block(block).wrap(Wrap { trim: false });
+
+    let line_count = paragraph.line_count(inner_width);
+    let max_scroll = line_count.saturating_sub(inner_height);
+    let scroll = max_scroll.saturating_sub(app.detail_scroll_offset);
+
+    let paragraph = paragraph.scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
 }
