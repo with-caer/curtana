@@ -1,13 +1,5 @@
 use crate::commands::{COMMANDS, CommandInfo};
-use crate::event::{Progress, SourceRef};
-use curtana_knows::manifest::TaxonomyEntry;
-
-/// Which pane currently has focus for scrolling.
-#[derive(Clone, Copy, PartialEq)]
-pub enum ActivePane {
-    Chat,
-    Detail,
-}
+use crate::event::Progress;
 
 /// Completion popup state for slash commands.
 pub struct CompletionState {
@@ -25,12 +17,6 @@ pub struct App {
     pub messages: Vec<Message>,
     /// Scroll offset from the bottom (0 = fully scrolled down).
     pub scroll_offset: usize,
-    /// Scroll offset for the detail panel.
-    pub detail_scroll_offset: usize,
-    /// Optional right-side detail panel.
-    pub detail_panel: Option<DetailView>,
-    /// Which pane currently has keyboard focus.
-    pub active_pane: ActivePane,
     /// Whether the app loop should keep running.
     pub running: bool,
     /// Current status indicator.
@@ -61,11 +47,6 @@ pub enum Role {
     User,
     Assistant,
     System,
-}
-
-pub enum DetailView {
-    TaxonomyList(Vec<(String, TaxonomyEntry)>),
-    Sources(Vec<SourceRef>),
 }
 
 impl Message {
@@ -101,9 +82,6 @@ impl App {
             cursor_position: 0,
             messages: vec![welcome],
             scroll_offset: 0,
-            detail_scroll_offset: 0,
-            detail_panel: None,
-            active_pane: ActivePane::Chat,
             running: true,
             status: AppStatus::Idle,
             completion: None,
@@ -212,47 +190,19 @@ impl App {
     }
 
     pub fn scroll_up(&mut self) {
-        match self.active_pane {
-            ActivePane::Chat => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
-            }
-            ActivePane::Detail => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
-            }
-        }
+        self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
     pub fn scroll_down(&mut self) {
-        match self.active_pane {
-            ActivePane::Chat => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
-            }
-            ActivePane::Detail => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
-            }
-        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_page_up(&mut self) {
-        match self.active_pane {
-            ActivePane::Chat => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-            }
-            ActivePane::Detail => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(10);
-            }
-        }
+        self.scroll_offset = self.scroll_offset.saturating_add(10);
     }
 
     pub fn scroll_page_down(&mut self) {
-        match self.active_pane {
-            ActivePane::Chat => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
-            }
-            ActivePane::Detail => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(10);
-            }
-        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(10);
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -261,17 +211,5 @@ impl App {
 
     pub fn clear_activity(&mut self) {
         self.activity_lines.clear();
-    }
-
-    pub fn toggle_detail_panel(&mut self) {
-        if self.detail_panel.is_some() {
-            match self.active_pane {
-                ActivePane::Chat => self.active_pane = ActivePane::Detail,
-                ActivePane::Detail => {
-                    self.active_pane = ActivePane::Chat;
-                    self.detail_scroll_offset = 0;
-                }
-            }
-        }
     }
 }

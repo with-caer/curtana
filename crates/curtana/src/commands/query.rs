@@ -4,9 +4,12 @@ use curtana_knows::manifest::Manifest;
 use curtana_knows::router::Router;
 use tokio::sync::mpsc;
 
-use crate::event::{ChannelWriter, CommandResult, Event, SourceRef};
+use crate::event::{ChannelWriter, CommandResult, Event};
 
-use super::Models;
+use super::{
+    ConversationEntry, MAX_HISTORY_ENTRIES, Models, TeeWriter, condense_sources,
+    format_conversation_context,
+};
 
 /// Conservative character budget for the sources block fed to the
 /// synthesis model.
@@ -66,46 +69,47 @@ pub(crate) async fn run(
         sources_block.push_str(&entry);
     }
 
-    let synthesis_prompt = format!(
-        "Based on the following sources, answer this query: \"{query}\"\n\n\
-         {sources_block}\
-         Synthesize a clear, concise answer. Cite the sources you draw from."
-    );
+    let conv_context = format_conversation_context(&models.conversation_history);
+    let synthesis_prompt = if conv_context.is_empty() {
+        format!(
+            "Based on the following sources, answer this query: \"{query}\"\n\n\
+             {sources_block}\
+             Synthesize a clear, concise answer. Cite the sources you draw from."
+        )
+    } else {
+        format!(
+            "{conv_context}\
+             Based on the following sources, answer the follow-up query: \"{query}\"\n\n\
+             {sources_block}\
+             Synthesize a clear, concise answer. Cite the sources you draw from."
+        )
+    };
 
-    // Stream the synthesized answer through the channel.
-    let mut writer = ChannelWriter::new(tx.clone());
-    if let Err(e) = models.chat.infer(&synthesis_prompt, &mut writer) {
-        tx.send(Event::Error(format!("inference error: {e:?}")))
-            .ok();
-        return;
+    // Stream the synthesized answer, capturing a copy for conversation history.
+    let mut response_buf: Vec<u8> = Vec::new();
+    {
+        let channel_writer = ChannelWriter::new(tx.clone());
+        let mut writer = TeeWriter::new(channel_writer, &mut response_buf);
+        if let Err(e) = models.chat.infer(&synthesis_prompt, &mut writer) {
+            tx.send(Event::Error(format!("inference error: {e:?}")))
+                .ok();
+            return;
+        }
     }
 
-    // Build compact source references.
-    let sources: Vec<SourceRef> = results
-        .iter()
-        .enumerate()
-        .map(|(i, result)| {
-            let text = format!("{}", result.artifact.contents);
-            let title = text
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('#')
-                .trim();
-            let title = if title.is_empty() {
-                format!("{}", result.artifact.id)
-            } else {
-                title.to_string()
-            };
-            SourceRef {
-                index: i + 1,
-                score: result.score,
-                taxonomy: result.taxonomy.clone(),
-                title,
-            }
-        })
-        .collect();
+    // Store conversation history for follow-up questions.
+    let response_text = String::from_utf8_lossy(&response_buf).into_owned();
+    let sources_summary = condense_sources(&sources_block);
+    models.conversation_history.push(ConversationEntry {
+        query: query.to_string(),
+        response: response_text,
+        sources: sources_summary,
+    });
+    if models.conversation_history.len() > MAX_HISTORY_ENTRIES {
+        models
+            .conversation_history
+            .drain(..models.conversation_history.len() - MAX_HISTORY_ENTRIES);
+    }
 
-    tx.send(Event::CommandDone(CommandResult::Query { sources }))
-        .ok();
+    tx.send(Event::CommandDone(CommandResult::QueryDone)).ok();
 }

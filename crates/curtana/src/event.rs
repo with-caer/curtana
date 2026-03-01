@@ -33,8 +33,8 @@ pub enum Event {
 
 /// Result of a completed command.
 pub enum CommandResult {
-    /// Query completed with source references.
-    Query { sources: Vec<SourceRef> },
+    /// Query completed.
+    QueryDone,
     /// Status listing of taxonomies.
     Status {
         entries: Vec<(String, TaxonomyEntry)>,
@@ -52,14 +52,6 @@ pub struct DiscoverFolder {
     pub source_host: String,
     pub source_username: String,
     pub already_tracked: bool,
-}
-
-/// A compact reference to a source artifact used in query results.
-pub struct SourceRef {
-    pub index: usize,
-    pub score: f32,
-    pub taxonomy: String,
-    pub title: String,
 }
 
 /// An `io::Write` implementation that sends tokens through a channel.

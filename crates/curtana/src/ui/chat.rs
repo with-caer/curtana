@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::markdown;
-use crate::app::{ActivePane, App, Role};
+use crate::app::{App, Role};
 
 /// Renders the scrollable chat message history.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
@@ -23,10 +23,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                     if !app.activity_lines.is_empty() {
                         let dim = Style::default().fg(Color::DarkGray);
                         for activity in &app.activity_lines {
-                            lines.push(Line::from(Span::styled(
-                                format!("  {activity}"),
-                                dim,
-                            )));
+                            lines.push(Line::from(Span::styled(format!("  {activity}"), dim)));
                         }
                     }
                     // Streaming placeholder cursor.
@@ -53,12 +50,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let focused = app.active_pane == ActivePane::Chat || app.detail_panel.is_none();
-    let border_color = if focused {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
+    let border_color = Color::Cyan;
 
     let block = Block::default()
         .borders(Borders::ALL)

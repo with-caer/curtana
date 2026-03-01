@@ -1,5 +1,4 @@
 mod chat;
-mod detail;
 mod input;
 mod markdown;
 
@@ -88,18 +87,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
     frame.render_widget(Paragraph::new(header_line), header_area);
 
-    // Body: chat area + optional detail panel.
-    if app.detail_panel.is_some() {
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(body_area);
-
-        chat::render(frame, app, body_chunks[0]);
-        detail::render(frame, app, body_chunks[1]);
-    } else {
-        chat::render(frame, app, body_area);
-    }
+    // Body: chat area.
+    chat::render(frame, app, body_area);
 
     // Input area.
     input::render(frame, app, input_area);

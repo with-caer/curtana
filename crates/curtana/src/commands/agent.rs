@@ -5,9 +5,12 @@ use curtana_knows::router::{Router, ScoredArtifact};
 use curtana_knows::tools::{self, ToolExecutor, ToolResult};
 use tokio::sync::mpsc;
 
-use crate::event::{ChannelWriter, CommandResult, Event, SourceRef};
+use crate::event::{ChannelWriter, CommandResult, Event};
 
-use super::Models;
+use super::{
+    ConversationEntry, MAX_HISTORY_ENTRIES, Models, TeeWriter, condense_sources,
+    format_conversation_context,
+};
 
 /// Maximum number of tool-use turns before forcing synthesis.
 const MAX_TURNS: usize = 5;
@@ -74,15 +77,30 @@ pub(crate) async fn run(
     tx.send(Event::StatusText("Thinking...".into())).ok();
 
     // Set the agent system prompt.
-    if let Err(e) = models.chat.replace_system_prompt(AGENT_SYSTEM_PROMPT.to_string()) {
+    if let Err(e) = models
+        .chat
+        .replace_system_prompt(AGENT_SYSTEM_PROMPT.to_string())
+    {
         tx.send(Event::Error(format!("failed to set agent prompt: {e:?}")))
             .ok();
         return;
     }
 
-    let opening_prompt = format!(
-        "The user asked: \"{query}\". Use tools to gather information, then write <done/>."
-    );
+    let conv_context = format_conversation_context(&models.conversation_history);
+    let opening_prompt = if conv_context.is_empty() {
+        format!("The user asked: \"{query}\". Use tools to gather information, then write <done/>.")
+    } else {
+        format!(
+            "You have already answered a previous question from this user. \
+             Here is the full prior conversation, including the source artifacts you used:\n\n\
+             {conv_context}\n\
+             The user now asks: \"{query}\"\n\n\
+             IMPORTANT: Review the prior conversation and sources above carefully. \
+             If the answer is already contained in those sources, write <done/> immediately \
+             without calling any tools. Only use tools if you need information that is NOT \
+             already present above."
+        )
+    };
 
     let mut gathered_sources: Vec<ScoredArtifact> = Vec::new();
     let mut gathered_context: Vec<String> = Vec::new();
@@ -93,8 +111,10 @@ pub(crate) async fn run(
         // Context budget guard based on actual content bytes.
         accumulated_bytes += prompt.len();
         if accumulated_bytes > MAX_GATHERING_BYTES {
-            tx.send(Event::StatusText("Context budget reached, synthesizing...".into()))
-                .ok();
+            tx.send(Event::StatusText(
+                "Context budget reached, synthesizing...".into(),
+            ))
+            .ok();
             break;
         }
 
@@ -129,8 +149,7 @@ pub(crate) async fn run(
                 tx.send(Event::StatusText(format!("Calling {}...", call.name)))
                     .ok();
 
-                let ToolResult { text, sources } =
-                    executor.execute(&mut models.embed, &call).await;
+                let ToolResult { text, sources } = executor.execute(&mut models.embed, &call).await;
 
                 let result_summary = summarize_result(&text);
                 tx.send(Event::ActivityLine(format!(
@@ -166,19 +185,19 @@ pub(crate) async fn run(
 
     // === Synthesis Phase ===
     models.chat.clear_history();
-    if let Err(e) =
-        models
-            .chat
-            .replace_system_prompt("You are a helpful assistant.".to_string())
+    if let Err(e) = models
+        .chat
+        .replace_system_prompt("You are a helpful assistant.".to_string())
     {
-        tx.send(Event::Error(format!("failed to restore system prompt: {e:?}")))
-            .ok();
+        tx.send(Event::Error(format!(
+            "failed to restore system prompt: {e:?}"
+        )))
+        .ok();
         return;
     }
 
     // If no tools were called, fall back to Router::search.
     let sources_block;
-    let final_sources: Vec<ScoredArtifact>;
 
     if gathered_sources.is_empty() && gathered_context.is_empty() {
         // Pure fallback: model never produced anything useful.
@@ -191,7 +210,6 @@ pub(crate) async fn run(
         }
 
         sources_block = build_sources_block(&results);
-        final_sources = results;
     } else if gathered_sources.is_empty() {
         // Model answered directly or context was gathered but no ScoredArtifacts.
         // Do a Router::search for source attribution.
@@ -206,7 +224,6 @@ pub(crate) async fn run(
         }
         block.push_str(&build_sources_block(&results));
         sources_block = block;
-        final_sources = results;
     } else {
         // Normal path: use gathered context, capped to fit in context.
         let mut block = String::new();
@@ -220,51 +237,50 @@ pub(crate) async fn run(
             block.push_str(ctx);
         }
         sources_block = block;
-        final_sources = gathered_sources;
     }
 
-    let synthesis_prompt = format!(
-        "Based on the following sources, answer this query: \"{query}\"\n\n\
-         {sources_block}\
-         Synthesize a clear, concise answer. Cite the sources you draw from."
-    );
+    let synthesis_prompt = if conv_context.is_empty() {
+        format!(
+            "Based on the following sources, answer this query: \"{query}\"\n\n\
+             {sources_block}\
+             Synthesize a clear, concise answer. Cite the sources you draw from."
+        )
+    } else {
+        format!(
+            "{conv_context}\
+             Based on the following sources, answer the follow-up query: \"{query}\"\n\n\
+             {sources_block}\
+             Synthesize a clear, concise answer. Cite the sources you draw from."
+        )
+    };
 
-    // Stream the synthesized answer.
-    let mut writer = ChannelWriter::new(tx.clone());
-    if let Err(e) = models.chat.infer(&synthesis_prompt, &mut writer) {
-        tx.send(Event::Error(format!("inference error: {e:?}")))
-            .ok();
-        return;
+    // Stream the synthesized answer, capturing a copy for conversation history.
+    let mut response_buf: Vec<u8> = Vec::new();
+    {
+        let channel_writer = ChannelWriter::new(tx.clone());
+        let mut writer = TeeWriter::new(channel_writer, &mut response_buf);
+        if let Err(e) = models.chat.infer(&synthesis_prompt, &mut writer) {
+            tx.send(Event::Error(format!("inference error: {e:?}")))
+                .ok();
+            return;
+        }
     }
 
-    // Build source references for the detail panel.
-    let sources: Vec<SourceRef> = final_sources
-        .iter()
-        .enumerate()
-        .map(|(i, result)| {
-            let text = format!("{}", result.artifact.contents);
-            let title = text
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches('#')
-                .trim();
-            let title = if title.is_empty() {
-                format!("{}", result.artifact.id)
-            } else {
-                title.to_string()
-            };
-            SourceRef {
-                index: i + 1,
-                score: result.score,
-                taxonomy: result.taxonomy.clone(),
-                title,
-            }
-        })
-        .collect();
+    // Store conversation history for follow-up questions.
+    let response_text = String::from_utf8_lossy(&response_buf).into_owned();
+    let sources_summary = condense_sources(&sources_block);
+    models.conversation_history.push(ConversationEntry {
+        query: query.to_string(),
+        response: response_text,
+        sources: sources_summary,
+    });
+    if models.conversation_history.len() > MAX_HISTORY_ENTRIES {
+        models
+            .conversation_history
+            .drain(..models.conversation_history.len() - MAX_HISTORY_ENTRIES);
+    }
 
-    tx.send(Event::CommandDone(CommandResult::Query { sources }))
-        .ok();
+    tx.send(Event::CommandDone(CommandResult::QueryDone)).ok();
 }
 
 /// Produces a short summary of a tool call, e.g. `browse(emails, limit=5)`.

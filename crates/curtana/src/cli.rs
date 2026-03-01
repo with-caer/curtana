@@ -150,12 +150,7 @@ pub async fn query(config: &Config, query: &str) {
 }
 
 /// Agent-mode query: gathering loop then synthesis.
-async fn query_agent(
-    data_dir: &Path,
-    query: &str,
-    manifest: &Manifest,
-    models: &mut Models,
-) {
+async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: &mut Models) {
     let executor = ToolExecutor::new(manifest.clone(), data_dir.to_path_buf());
 
     // === Gathering Phase ===
@@ -193,8 +188,7 @@ async fn query_agent(
         match tools::parse_tool_response(&output) {
             tools::ParseResult::ToolCall(call) => {
                 eprintln!("[tool: {}]", call.name);
-                let ToolResult { text, sources } =
-                    executor.execute(&mut models.embed, &call).await;
+                let ToolResult { text, sources } = executor.execute(&mut models.embed, &call).await;
                 gathered_context.push(text.clone());
                 gathered_sources.extend(sources);
                 prompt = format!("Tool result:\n{text}");

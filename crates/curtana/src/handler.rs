@@ -1,7 +1,7 @@
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
-use crate::app::{App, AppStatus, DetailView, Message};
+use crate::app::{App, AppStatus, Message};
 use crate::commands::{self, Command, CommandRequest};
 use crate::event::{CommandResult, Event};
 
@@ -18,9 +18,8 @@ const HELP_TEXT: &str = "\
 ## Keyboard shortcuts
 
 - `Enter` \u{2014} Submit input
-- `Tab` \u{2014} Switch focus between chat and detail panel
-- `Up`/`Down` \u{2014} Scroll focused pane
-- `PgUp`/`PgDn` \u{2014} Scroll focused pane (fast)
+- `Up`/`Down` \u{2014} Scroll chat
+- `PgUp`/`PgDn` \u{2014} Scroll chat (fast)
 - `Ctrl+C` \u{2014} Exit";
 
 /// Processes an event and mutates application state.
@@ -133,7 +132,6 @@ fn handle_key(
         KeyCode::Down => app.scroll_down(),
         KeyCode::PageUp => app.scroll_page_up(),
         KeyCode::PageDown => app.scroll_page_down(),
-        KeyCode::Tab => app.toggle_detail_panel(),
         _ => {}
     }
 }
@@ -205,10 +203,8 @@ fn submit(app: &mut App, input: &str, cmd_tx: &mpsc::UnboundedSender<CommandRequ
 fn handle_command_done(app: &mut App, result: CommandResult) {
     app.progress = None;
     match result {
-        CommandResult::Query { sources } => {
+        CommandResult::QueryDone => {
             app.status = AppStatus::Idle;
-            app.detail_panel = Some(DetailView::Sources(sources));
-            app.detail_scroll_offset = 0;
         }
         CommandResult::Status { entries } => {
             app.status = AppStatus::Idle;
@@ -221,8 +217,6 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
                 }
             }
             app.add_message(Message::system(text));
-            app.detail_panel = Some(DetailView::TaxonomyList(entries));
-            app.detail_scroll_offset = 0;
         }
         CommandResult::DiscoverFolders { folders } => {
             let mut text = String::from("## Available folders\n\n");

@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use curtana_infers::TextEmbeddingModel;
 
 use crate::{
+    Artifact, BrowseOrder,
     manifest::Manifest,
     open_taxonomy_store,
     router::{Router, ScoredArtifact},
-    truncate_text, Artifact, BrowseOrder,
+    truncate_text,
 };
 
 /// Maximum characters in a single tool result. Tool results are injected
@@ -85,8 +86,7 @@ fn parse_tool_call(inner: &str) -> Result<ToolCall, String> {
     let args = if rest.is_empty() {
         serde_json::Value::Object(Default::default())
     } else {
-        serde_json::from_str(rest)
-            .map_err(|e| format!("invalid JSON args in tool call: {e}"))?
+        serde_json::from_str(rest).map_err(|e| format!("invalid JSON args in tool call: {e}"))?
     };
 
     Ok(ToolCall { name, args })

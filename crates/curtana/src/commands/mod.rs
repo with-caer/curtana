@@ -4,6 +4,7 @@ pub mod ingest;
 pub mod query;
 pub mod status;
 
+use std::io;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -66,6 +67,116 @@ pub enum CommandRequest {
 pub(crate) struct Models {
     chat: ChatModel,
     embed: TextEmbeddingModel,
+    conversation_history: Vec<ConversationEntry>,
+}
+
+/// Maximum number of prior conversation entries to retain.
+pub(crate) const MAX_HISTORY_ENTRIES: usize = 2;
+
+/// Maximum total characters for the prior-conversation context block.
+const MAX_HISTORY_CHARS: usize = 12_000;
+
+/// Maximum characters of source content stored per history entry.
+const MAX_SOURCES_PER_ENTRY: usize = 6_000;
+
+/// A single conversation turn stored for follow-up context.
+pub(crate) struct ConversationEntry {
+    pub query: String,
+    pub response: String,
+    /// Condensed source content from this turn, so follow-up questions
+    /// can reference the actual artifacts without re-searching.
+    pub sources: String,
+}
+
+/// Formats prior conversation history into a context block for prompts.
+/// Includes both the synthesized answer and key source content so the
+/// model can answer follow-ups without re-searching.
+pub(crate) fn format_conversation_context(history: &[ConversationEntry]) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+
+    let mut block = String::from("Previous conversation:\n");
+    let mut budget = MAX_HISTORY_CHARS - block.len();
+
+    for entry in history {
+        let entry_header = format!("User: {}\nAssistant: ", entry.query);
+        let header_len = entry_header.len() + 2; // +2 for trailing newlines
+
+        if budget < header_len + 100 {
+            break;
+        }
+
+        block.push_str(&entry_header);
+
+        // Include the response, truncated if needed.
+        let max_response_len = budget - header_len;
+        if entry.response.len() > max_response_len {
+            block.push_str(&entry.response[..max_response_len]);
+            block.push_str("...");
+        } else {
+            block.push_str(&entry.response);
+        }
+        block.push_str("\n\n");
+
+        budget = budget.saturating_sub(header_len + entry.response.len().min(max_response_len));
+
+        // Append condensed source content if available and budget allows.
+        if !entry.sources.is_empty() && budget > 200 {
+            let sources_header = "Key sources from that answer:\n";
+            block.push_str(sources_header);
+            budget = budget.saturating_sub(sources_header.len());
+
+            let max_sources_len = budget.min(entry.sources.len());
+            if entry.sources.len() > max_sources_len {
+                block.push_str(&entry.sources[..max_sources_len]);
+                block.push_str("...\n\n");
+            } else {
+                block.push_str(&entry.sources);
+                block.push_str("\n\n");
+            }
+            budget = budget.saturating_sub(max_sources_len + 2);
+        }
+    }
+
+    block
+}
+
+/// Builds a condensed sources summary for conversation history storage.
+/// Takes the raw sources block and truncates it to fit the per-entry budget.
+pub(crate) fn condense_sources(sources_block: &str) -> String {
+    if sources_block.len() <= MAX_SOURCES_PER_ENTRY {
+        sources_block.to_string()
+    } else {
+        let mut truncated = sources_block[..MAX_SOURCES_PER_ENTRY].to_string();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+/// An `io::Write` adapter that forwards writes to an inner writer while
+/// also appending the raw bytes to a buffer for later capture.
+pub(crate) struct TeeWriter<'a, W> {
+    inner: W,
+    buffer: &'a mut Vec<u8>,
+}
+
+impl<'a, W> TeeWriter<'a, W> {
+    pub(crate) fn new(inner: W, buffer: &'a mut Vec<u8>) -> Self {
+        Self { inner, buffer }
+    }
+}
+
+impl<W: io::Write> io::Write for TeeWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.buffer.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Parses raw user input into a `Command`.
@@ -170,5 +281,9 @@ fn load_models(config: &Config) -> Result<Models, String> {
     let embed = registry
         .load_text_embedding_model(&config.embed_model)
         .map_err(|e| format!("failed to load embedding model: {e:?}"))?;
-    Ok(Models { chat, embed })
+    Ok(Models {
+        chat,
+        embed,
+        conversation_history: Vec::new(),
+    })
 }

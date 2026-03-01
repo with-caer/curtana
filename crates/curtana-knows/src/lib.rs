@@ -303,12 +303,7 @@ impl Store {
     }
 
     /// Browses artifacts ordered by timestamp.
-    pub async fn browse(
-        &self,
-        offset: usize,
-        limit: usize,
-        order: BrowseOrder,
-    ) -> Vec<Artifact> {
+    pub async fn browse(&self, offset: usize, limit: usize, order: BrowseOrder) -> Vec<Artifact> {
         let this = self.clone();
         let order_sql = order.sql().to_string();
 
