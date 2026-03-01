@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod discover;
 pub mod ingest;
 pub mod query;
@@ -118,7 +119,11 @@ pub fn spawn_command_thread(
                             }
                         }
                         let m = models.as_mut().unwrap();
-                        query::run(&config, &q, m, &event_tx).await;
+                        if config.use_agent_mode() {
+                            agent::run(&config, &q, m, &event_tx).await;
+                        } else {
+                            query::run(&config, &q, m, &event_tx).await;
+                        }
                     }
                     CommandRequest::Status => {
                         status::run(&config, &event_tx);

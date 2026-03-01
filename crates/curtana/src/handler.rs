@@ -30,12 +30,17 @@ pub fn handle_event(app: &mut App, event: Event, cmd_tx: &mpsc::UnboundedSender<
             handle_key(app, key.code, key.modifiers, cmd_tx);
         }
         Event::Token(token) => {
+            if !app.activity_lines.is_empty() {
+                app.clear_activity();
+            }
             app.append_to_last_message(&token);
         }
         Event::CommandDone(result) => {
+            app.clear_activity();
             handle_command_done(app, result);
         }
         Event::Error(err) => {
+            app.clear_activity();
             app.add_message(Message::system(format!("Error: {err}")));
             app.status = AppStatus::Idle;
             app.progress = None;
@@ -52,6 +57,10 @@ pub fn handle_event(app: &mut App, event: Event, cmd_tx: &mpsc::UnboundedSender<
             if matches!(app.status, AppStatus::Loading(_)) {
                 app.status = AppStatus::Loading(msg);
             }
+        }
+        Event::ActivityLine(line) => {
+            app.activity_lines.push(line);
+            app.scroll_to_bottom();
         }
         _ => {}
     }

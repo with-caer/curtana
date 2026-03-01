@@ -13,6 +13,9 @@ pub struct Config {
     pub chat_model: String,
     /// Path to a text embedding model GGUF file.
     pub embed_model: String,
+    /// Enable agent mode for queries (tool-use loop).
+    /// Defaults to `true`.
+    pub agent_mode: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -32,5 +35,9 @@ impl Config {
 
     pub fn data_dir(&self) -> &str {
         self.data_dir.as_deref().unwrap_or("./.curtana")
+    }
+
+    pub fn use_agent_mode(&self) -> bool {
+        self.agent_mode.unwrap_or(true)
     }
 }

@@ -27,6 +27,8 @@ pub enum Event {
     Progress(Progress),
     /// Update the loading status message in the header.
     StatusText(String),
+    /// An activity log line shown during the agent gathering phase.
+    ActivityLine(String),
 }
 
 /// Result of a completed command.

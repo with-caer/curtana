@@ -66,7 +66,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         // Upsert into taxonomy store.
         let store = open_taxonomy_store(data_dir, taxonomy_name).await;
         for artifact in &artifacts {
-            store.upsert(artifact.id.clone(), artifact).await;
+            store.upsert(artifact).await;
         }
 
         // Embed pending artifacts.

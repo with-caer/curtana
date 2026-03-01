@@ -2,11 +2,12 @@ extern crate alloc;
 
 pub mod manifest;
 pub mod router;
+pub mod tools;
 
 use std::{path::Path, sync::Arc};
 
 use codas::{
-    codec::{Decodable, Encodable, ReadsDecodable, WritesEncodable},
+    codec::{Decodable, ReadsDecodable, WritesEncodable},
     types::Text,
 };
 use curtana_infers::TextEmbeddingModel;
@@ -15,6 +16,21 @@ use tokio::sync::Mutex;
 use tracing::{info, trace};
 
 codas_macros::export_coda!("crates/curtana-knows/src/coda.md");
+
+/// Sort order for browsing artifacts.
+pub enum BrowseOrder {
+    Asc,
+    Desc,
+}
+
+impl BrowseOrder {
+    fn sql(&self) -> &str {
+        match self {
+            BrowseOrder::Asc => "ASC",
+            BrowseOrder::Desc => "DESC",
+        }
+    }
+}
 
 /// Datastore for knowledge graph storage and retrieval.
 #[derive(Clone)]
@@ -43,6 +59,17 @@ impl Store {
                     [],
                 )
                 .unwrap();
+
+            // Backwards-compatible schema migration: add structured columns
+            // for SQL-level filtering. These are denormalized from the blob.
+            let _ = connection.execute(
+                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS timestamp BIGINT",
+                [],
+            );
+            let _ = connection.execute(
+                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS author VARCHAR",
+                [],
+            );
         })
         .await
         .unwrap();
@@ -50,19 +77,23 @@ impl Store {
         this
     }
 
-    pub async fn upsert(&self, id: Text, data: &impl Encodable) {
+    pub async fn upsert(&self, artifact: &Artifact) {
         let this = self.clone();
 
+        let id = format!("{}", artifact.id);
+        let timestamp = artifact.timestamp as i64;
+        let author = format!("{}", artifact.author);
+
         let mut data_bytes = vec![];
-        data_bytes.write_data(data).unwrap();
+        data_bytes.write_data(artifact).unwrap();
 
         tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
 
             let affected_rows = connection
                 .execute(
-                    "INSERT OR REPLACE INTO artifacts (id, data) VALUES (?, ?)",
-                    params![id.as_str(), data_bytes],
+                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author) VALUES (?, ?, ?, ?)",
+                    params![id.as_str(), data_bytes, timestamp, author.as_str()],
                 )
                 .unwrap();
 
@@ -143,10 +174,10 @@ impl Store {
         info!("embedding {} artifacts", total);
         on_progress(0, total);
 
-        for (i, (artifact_id, mut artifact)) in unembedded.into_iter().enumerate() {
+        for (i, (_artifact_id, mut artifact)) in unembedded.into_iter().enumerate() {
             let text = format!("{}", artifact.contents);
             artifact.embedding = embed_with_chunking(model, &text);
-            self.upsert(artifact_id.into(), &artifact).await;
+            self.upsert(&artifact).await;
             on_progress(i + 1, total);
 
             if i % 50 == 0 {
@@ -253,6 +284,109 @@ impl Store {
             .into_iter()
             .map(|(_, artifact)| artifact)
             .collect()
+    }
+
+    /// Returns the total number of artifacts in the store.
+    pub async fn count(&self) -> usize {
+        let this = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let connection = this.connection.blocking_lock();
+            connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap() as usize
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Browses artifacts ordered by timestamp.
+    pub async fn browse(
+        &self,
+        offset: usize,
+        limit: usize,
+        order: BrowseOrder,
+    ) -> Vec<Artifact> {
+        let this = self.clone();
+        let order_sql = order.sql().to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let connection = this.connection.blocking_lock();
+
+            let sql = format!(
+                "SELECT data FROM artifacts ORDER BY COALESCE(timestamp, 0) {} LIMIT ? OFFSET ?",
+                order_sql,
+            );
+            let mut statement = connection.prepare(&sql).unwrap();
+            let rows = statement
+                .query_map(params![limit as i64, offset as i64], |row| {
+                    let data: Vec<u8> = row.get(0).unwrap();
+                    let artifact: Artifact = data.as_slice().read_data().unwrap();
+                    Ok(artifact)
+                })
+                .unwrap();
+
+            rows.into_iter().filter_map(|r| r.ok()).collect()
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Filters artifacts by author and/or time range.
+    pub async fn filter(
+        &self,
+        author: Option<String>,
+        after: Option<u64>,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Vec<Artifact> {
+        let this = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let connection = this.connection.blocking_lock();
+
+            let has_author = author.is_some();
+            let author_val = author.unwrap_or_default();
+            let has_after = after.is_some();
+            let after_val = after.map(|v| v as i64).unwrap_or(0);
+            let has_before = before.is_some();
+            let before_val = before.map(|v| v as i64).unwrap_or(0);
+
+            let mut statement = connection
+                .prepare(
+                    "SELECT data FROM artifacts \
+                     WHERE (NOT ? OR author = ?) \
+                     AND (NOT ? OR timestamp >= ?) \
+                     AND (NOT ? OR timestamp <= ?) \
+                     ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?",
+                )
+                .unwrap();
+
+            let rows = statement
+                .query_map(
+                    params![
+                        has_author,
+                        author_val.as_str(),
+                        has_after,
+                        after_val,
+                        has_before,
+                        before_val,
+                        limit as i64,
+                    ],
+                    |row| {
+                        let data: Vec<u8> = row.get(0).unwrap();
+                        let artifact: Artifact = data.as_slice().read_data().unwrap();
+                        Ok(artifact)
+                    },
+                )
+                .unwrap();
+
+            rows.into_iter().filter_map(|r| r.ok()).collect()
+        })
+        .await
+        .unwrap()
     }
 }
 
@@ -379,17 +513,80 @@ mod tests {
     async fn smoke() {
         let store = Store::new(None).await;
 
-        let data = Text::from("hello, testy");
+        let artifact = Artifact {
+            id: "abc".into(),
+            timestamp: 1700000000,
+            author: "tester".into(),
+            contents: "hello, testy".into(),
+            embedding: vec![],
+        };
 
-        store.upsert("abc".into(), &data).await;
+        store.upsert(&artifact).await;
 
-        let mut found_data = Text::EMPTY;
-        assert!(store.get("abc".into(), &mut found_data).await.is_ok());
+        let mut found = Artifact {
+            id: Text::EMPTY,
+            timestamp: 0,
+            author: Text::EMPTY,
+            contents: Text::EMPTY,
+            embedding: vec![],
+        };
+        assert!(store.get("abc".into(), &mut found).await.is_ok());
+        assert_eq!(format!("{}", found.contents), "hello, testy");
+        assert_eq!(found.timestamp, 1700000000);
+        assert_eq!(format!("{}", found.author), "tester");
 
-        assert_eq!(data, found_data);
+        let mut not_found = Text::EMPTY;
         assert_eq!(
             Err(Error::NotFound),
-            store.get("xyz".into(), &mut found_data).await
+            store.get("xyz".into(), &mut not_found).await
         );
+    }
+
+    #[tokio::test]
+    async fn count_browse_filter() {
+        let store = Store::new(None).await;
+
+        // Insert a few artifacts.
+        for i in 0..3 {
+            let artifact = Artifact {
+                id: format!("art-{i}").into(),
+                timestamp: 1000 + i as u64,
+                author: if i == 0 { "alice".into() } else { "bob".into() },
+                contents: format!("content {i}").into(),
+                embedding: vec![],
+            };
+            store.upsert(&artifact).await;
+        }
+
+        assert_eq!(store.count().await, 3);
+
+        // Browse descending.
+        let browsed = store.browse(0, 10, BrowseOrder::Desc).await;
+        assert_eq!(browsed.len(), 3);
+        assert_eq!(browsed[0].timestamp, 1002);
+
+        // Browse ascending.
+        let browsed = store.browse(0, 10, BrowseOrder::Asc).await;
+        assert_eq!(browsed[0].timestamp, 1000);
+
+        // Browse with offset/limit.
+        let browsed = store.browse(1, 1, BrowseOrder::Desc).await;
+        assert_eq!(browsed.len(), 1);
+        assert_eq!(browsed[0].timestamp, 1001);
+
+        // Filter by author.
+        let filtered = store
+            .filter(Some("alice".to_string()), None, None, 10)
+            .await;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(format!("{}", filtered[0].id), "art-0");
+
+        // Filter by time range.
+        let filtered = store.filter(None, Some(1001), Some(1002), 10).await;
+        assert_eq!(filtered.len(), 2);
+
+        // Filter with limit.
+        let filtered = store.filter(None, None, None, 2).await;
+        assert_eq!(filtered.len(), 2);
     }
 }

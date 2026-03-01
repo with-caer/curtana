@@ -134,6 +134,35 @@ impl ChatModel {
         Ok(())
     }
 
+    /// Non-streaming inference that accumulates history and returns
+    /// the full output as a String.
+    pub fn infer_with_history_to_string(&mut self, prompt: &str) -> Result<String, Error> {
+        let mut buf = Vec::new();
+        self.infer_with_history(prompt, &mut buf)?;
+        Ok(String::from_utf8(buf).unwrap())
+    }
+
+    /// Replace the system prompt (messages[0]).
+    pub fn replace_system_prompt(&mut self, prompt: String) -> Result<(), Error> {
+        if self.messages.is_empty() {
+            self.messages
+                .push(LlamaChatMessage::new("system".to_string(), prompt)?);
+        } else {
+            self.messages[0] = LlamaChatMessage::new("system".to_string(), prompt)?;
+        }
+        Ok(())
+    }
+
+    /// Clear all history except the system prompt.
+    pub fn clear_history(&mut self) {
+        self.messages.truncate(1);
+    }
+
+    /// Returns the number of messages in the conversation history.
+    pub fn history_len(&self) -> usize {
+        self.messages.len()
+    }
+
     /// Run inference against the model with `prompt`,
     /// writing the model's output to `output`.
     pub fn infer(&mut self, prompt: &str, output: &mut impl Write) -> Result<(), Error> {

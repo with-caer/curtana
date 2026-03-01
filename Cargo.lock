@@ -951,6 +951,7 @@ dependencies = [
  "curtana-infers",
  "duckdb",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",

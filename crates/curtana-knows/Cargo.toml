@@ -25,6 +25,9 @@ toml = "0.8.22"
 # Serialization (required by codas-macros generated code).
 serde = { workspace = true }
 
+# JSON parsing for tool arguments.
+serde_json = "1"
+
 # Async runtime.
 tokio = { workspace = true }
 

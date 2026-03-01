@@ -41,6 +41,8 @@ pub struct App {
     pub spinner_frame: usize,
     /// Progress for a long-running operation (shown in header).
     pub progress: Option<Progress>,
+    /// Activity log lines shown during the agent gathering phase.
+    pub activity_lines: Vec<String>,
 }
 
 pub enum AppStatus {
@@ -107,6 +109,7 @@ impl App {
             completion: None,
             spinner_frame: 0,
             progress: None,
+            activity_lines: Vec::new(),
         }
     }
 
@@ -254,6 +257,10 @@ impl App {
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    pub fn clear_activity(&mut self) {
+        self.activity_lines.clear();
     }
 
     pub fn toggle_detail_panel(&mut self) {

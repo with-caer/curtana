@@ -20,6 +20,15 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         match message.role {
             Role::Assistant | Role::System => {
                 if message.content.is_empty() {
+                    if !app.activity_lines.is_empty() {
+                        let dim = Style::default().fg(Color::DarkGray);
+                        for activity in &app.activity_lines {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {activity}"),
+                                dim,
+                            )));
+                        }
+                    }
                     // Streaming placeholder cursor.
                     lines.push(Line::from(Span::styled(
                         "\u{2588}",
