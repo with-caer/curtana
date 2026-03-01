@@ -1,9 +1,12 @@
+use std::fmt;
+
 use async_native_tls::TlsConnector;
 use chrono::DateTime;
 use futures::TryStreamExt;
 use mail_parser::MessageParser;
 use serde::Deserialize;
 use tokio::net::TcpStream;
+use tracing::warn;
 
 use crate::ToMarkdown;
 
@@ -29,51 +32,116 @@ pub struct ImapFolder {
     pub is_selectable: bool,
 }
 
+/// Errors that can occur during IMAP operations.
+#[derive(Debug)]
+pub enum ImapError {
+    ConnectionFailed(String),
+    TlsFailed(String),
+    AuthFailed(String),
+    SessionError(String),
+    FetchFailed(String),
+    ParseFailed(String),
+}
+
+impl fmt::Display for ImapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImapError::ConnectionFailed(e) => write!(f, "IMAP connection failed: {e}"),
+            ImapError::TlsFailed(e) => write!(f, "IMAP TLS upgrade failed: {e}"),
+            ImapError::AuthFailed(e) => write!(f, "IMAP authentication failed: {e}"),
+            ImapError::SessionError(e) => write!(f, "IMAP session error: {e}"),
+            ImapError::FetchFailed(e) => write!(f, "IMAP fetch failed: {e}"),
+            ImapError::ParseFailed(e) => write!(f, "IMAP message parse failed: {e}"),
+        }
+    }
+}
+
+/// RAII wrapper around an IMAP session that logs out on drop.
+struct SessionGuard {
+    session: Option<async_imap::Session<async_native_tls::TlsStream<TcpStream>>>,
+}
+
+impl SessionGuard {
+    fn new(session: async_imap::Session<async_native_tls::TlsStream<TcpStream>>) -> Self {
+        Self {
+            session: Some(session),
+        }
+    }
+
+    fn inner_mut(&mut self) -> &mut async_imap::Session<async_native_tls::TlsStream<TcpStream>> {
+        self.session.as_mut().expect("session already consumed")
+    }
+
+    /// Explicitly log out, consuming the guard.
+    async fn logout(mut self) {
+        if let Some(mut session) = self.session.take() {
+            let _ = session.logout().await;
+        }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        // Best-effort logout if not already consumed.
+        // Can't do async in Drop, but we ensure the session is dropped.
+        self.session.take();
+    }
+}
+
 /// Establishes an authenticated IMAP session over STARTTLS.
-async fn imap_session(
-    config: &ImapConfig,
-) -> async_imap::Session<async_native_tls::TlsStream<TcpStream>> {
+async fn imap_session(config: &ImapConfig) -> Result<SessionGuard, ImapError> {
     // Establish a TCP connection.
     let tcp_stream = TcpStream::connect((config.host.clone(), config.port))
         .await
-        .unwrap();
+        .map_err(|e| ImapError::ConnectionFailed(e.to_string()))?;
 
     // Establish an IMAP connection.
     let mut client = async_imap::Client::new(tcp_stream);
-    let _greeting = client
-        .read_response()
-        .await
-        .expect("unexpected end of stream, expected greeting");
+    let _greeting = client.read_response().await.ok_or_else(|| {
+        ImapError::ConnectionFailed("unexpected end of stream, expected greeting".into())
+    })?;
 
     // Upgrade to a TLS connection.
     client
         .run_command_and_check_ok("STARTTLS", None)
         .await
-        .unwrap();
+        .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
     let stream = client.into_inner();
-    let tls = TlsConnector::new()
-        .danger_accept_invalid_hostnames(true)
-        .danger_accept_invalid_certs(true);
-    let tls_stream = tls.connect(config.host.clone(), stream).await.unwrap();
+    let mut tls = TlsConnector::new();
+    if config.accept_invalid_certs {
+        tls = tls
+            .danger_accept_invalid_hostnames(true)
+            .danger_accept_invalid_certs(true);
+    }
+    let tls_stream = tls
+        .connect(config.host.clone(), stream)
+        .await
+        .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
     let client = async_imap::Client::new(tls_stream);
 
     // Authenticate with the IMAP server.
-    client
+    let session = client
         .login(config.username.clone(), config.password.clone())
         .await
-        .unwrap()
+        .map_err(|e| ImapError::AuthFailed(e.0.to_string()))?;
+
+    Ok(SessionGuard::new(session))
 }
 
 /// Lists all folders on the IMAP server. Read-only — does not select
 /// any mailbox or fetch any messages.
-pub async fn discover_folders(config: &ImapConfig) -> Vec<ImapFolder> {
-    let mut session = imap_session(config).await;
+pub async fn discover_folders(config: &ImapConfig) -> Result<Vec<ImapFolder>, ImapError> {
+    let mut guard = imap_session(config).await?;
+    let session = guard.inner_mut();
 
-    let names = session.list(None, Some("*")).await.unwrap();
+    let names = session
+        .list(None, Some("*"))
+        .await
+        .map_err(|e| ImapError::SessionError(e.to_string()))?;
     let folders: Vec<_> = names
         .try_collect::<Vec<_>>()
         .await
-        .unwrap()
+        .map_err(|e| ImapError::SessionError(e.to_string()))?
         .into_iter()
         .map(|name| {
             let is_selectable = !name
@@ -89,55 +157,84 @@ pub async fn discover_folders(config: &ImapConfig) -> Vec<ImapFolder> {
         })
         .collect();
 
-    session.logout().await.unwrap();
+    guard.logout().await;
 
-    folders
+    Ok(folders)
 }
 
-pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
-    let mut session = imap_session(config).await;
+pub async fn fetch_emails(config: &ImapConfig) -> Result<Vec<EmailMessage>, ImapError> {
+    let mut guard = imap_session(config).await?;
+    let session = guard.inner_mut();
 
     let mailbox = config.mailbox.as_deref().unwrap_or("INBOX");
     let sequence = config.sequence.as_deref().unwrap_or("1:*");
 
     // Request access to the mailbox.
-    session.select(mailbox).await.unwrap();
+    session
+        .select(mailbox)
+        .await
+        .map_err(|e| ImapError::SessionError(e.to_string()))?;
 
     // Fetch messages in this mailbox, along with their RFC822 field.
-    // RFC 822 dictates the format of the body of e-mails
-    let messages_stream = session.fetch(sequence, "RFC822").await.unwrap();
-    let messages: Vec<_> = messages_stream.try_collect().await.unwrap();
+    let messages_stream = session
+        .fetch(sequence, "RFC822")
+        .await
+        .map_err(|e| ImapError::FetchFailed(e.to_string()))?;
+    let raw_messages: Vec<_> = messages_stream
+        .try_collect()
+        .await
+        .map_err(|e| ImapError::FetchFailed(e.to_string()))?;
 
-    // Parse messages.
-    let mut messages: Vec<_> = messages
+    // Parse messages, skipping any that fail to parse.
+    let mut messages: Vec<_> = raw_messages
         .into_iter()
-        .map(|m| {
-            let body = m.body().expect("message did not have a body!");
-            let message = MessageParser::default().parse(body).unwrap();
-            message.into_owned()
+        .filter_map(|m| {
+            let body = match m.body() {
+                Some(b) => b,
+                None => {
+                    warn!("skipping message with no body");
+                    return None;
+                }
+            };
+            match MessageParser::default().parse(body) {
+                Some(message) => Some(message.into_owned()),
+                None => {
+                    warn!("skipping unparseable message");
+                    None
+                }
+            }
         })
         .collect();
 
     // Sort messages in descending order by date, similar to default inbox sorting.
     messages.sort_by(|a, b| {
-        let a = a.date().unwrap();
-        let b = b.date().unwrap();
-        a.cmp(b).reverse()
+        let a_date = a.date();
+        let b_date = b.date();
+        match (a_date, b_date) {
+            (Some(a), Some(b)) => a.cmp(b).reverse(),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
     });
 
-    // Extract message metadata and bodies.
+    // Extract message metadata and bodies, skipping messages without required fields.
     let messages: Vec<_> = messages
         .into_iter()
-        .map(|m| {
-            let message_id = m.message_id().unwrap().to_owned();
+        .filter_map(|m| {
+            let message_id = m.message_id().unwrap_or_default().to_owned();
+            if message_id.is_empty() {
+                warn!("skipping message with no Message-ID");
+                return None;
+            }
             let from = m
                 .from()
                 .and_then(|a| a.first())
                 .and_then(|a| a.address())
                 .map(|a| a.to_string())
                 .unwrap_or_default();
-            let timestamp = m.date().unwrap().to_timestamp();
-            let subject = m.subject().unwrap().to_owned();
+            let timestamp = m.date().map(|d| d.to_timestamp()).unwrap_or(0);
+            let subject = m.subject().unwrap_or_default().to_owned();
 
             let body = if m.html_body_count() > 0 {
                 let mut html = String::new();
@@ -164,20 +261,20 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
                 text
             };
 
-            EmailMessage {
+            Some(EmailMessage {
                 message_id,
                 from,
                 timestamp,
                 subject,
                 body,
-            }
+            })
         })
         .collect();
 
     // Close session.
-    session.logout().await.unwrap();
+    guard.logout().await;
 
-    messages
+    Ok(messages)
 }
 
 impl ToMarkdown for EmailMessage {
@@ -209,4 +306,9 @@ pub struct ImapConfig {
     /// IMAP sequence set to fetch, e.g. `"1:*"`, `"1:50"`.
     /// Defaults to `"1:*"` when `None`.
     pub sequence: Option<String>,
+    /// Accept invalid TLS certificates and hostnames.
+    /// **Only** enable for local/dev IMAP servers.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }

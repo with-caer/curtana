@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use serde::Deserialize;
 
@@ -26,11 +26,9 @@ pub enum SourceConfig {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Self {
-        let contents = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read config at {}: {e}", path.display()));
-        toml::from_str(&contents)
-            .unwrap_or_else(|e| panic!("failed to parse config at {}: {e}", path.display()))
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+        toml::from_str(&contents).map_err(ConfigError::Parse)
     }
 
     pub fn data_dir(&self) -> &str {
@@ -39,5 +37,20 @@ impl Config {
 
     pub fn use_agent_mode(&self) -> bool {
         self.agent_mode.unwrap_or(true)
+    }
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Io(std::io::Error),
+    Parse(toml::de::Error),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Io(e) => write!(f, "config I/O error: {e}"),
+            ConfigError::Parse(e) => write!(f, "config parse error: {e}"),
+        }
     }
 }

@@ -24,8 +24,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(display).style(style).block(block);
     frame.render_widget(paragraph, area);
 
-    // Position the cursor when input is active.
-    if !app.input.is_empty() || app.input.is_empty() {
+    // Position the cursor.
+    {
         let prefix_width = 2u16; // "> "
         let cursor_offset = app.input[..app.cursor_position].chars().count() as u16;
         let cursor_x = area.x + 1 + prefix_width + cursor_offset;

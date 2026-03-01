@@ -4,7 +4,7 @@ pub mod manifest;
 pub mod router;
 pub mod tools;
 
-use std::{path::Path, sync::Arc};
+use std::{fmt, path::Path, sync::Arc};
 
 use codas::{
     codec::{Decodable, ReadsDecodable, WritesEncodable},
@@ -13,7 +13,7 @@ use codas::{
 use curtana_infers::TextEmbeddingModel;
 use duckdb::params;
 use tokio::sync::Mutex;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 codas_macros::export_coda!("crates/curtana-knows/src/coda.md");
 
@@ -39,10 +39,13 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn new(path: Option<&str>) -> Self {
+    pub async fn new(path: Option<&str>) -> Result<Self, Error> {
         let connection = match path {
-            Some(path) => duckdb::Connection::open(path).unwrap(),
-            None => duckdb::Connection::open_in_memory().unwrap(),
+            Some(path) => {
+                duckdb::Connection::open(path).map_err(|e| Error::DatabaseError(e.to_string()))?
+            }
+            None => duckdb::Connection::open_in_memory()
+                .map_err(|e| Error::DatabaseError(e.to_string()))?,
         };
 
         let this = Self {
@@ -50,7 +53,7 @@ impl Store {
         };
 
         let this_copy = this.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let connection = this_copy.connection.blocking_lock();
 
             connection
@@ -58,7 +61,7 @@ impl Store {
                     "CREATE TABLE IF NOT EXISTS artifacts (id VARCHAR PRIMARY KEY, data BLOB);",
                     [],
                 )
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             // Backwards-compatible schema migration: add structured columns
             // for SQL-level filtering. These are denormalized from the blob.
@@ -70,14 +73,22 @@ impl Store {
                 "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS author VARCHAR",
                 [],
             );
+
+            // Migration: add embedding column for DB-level similarity search.
+            let _ = connection.execute(
+                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS embedding BLOB",
+                [],
+            );
+
+            Ok(())
         })
         .await
-        .unwrap();
+        .map_err(|e| Error::SpawnError(e.to_string()))??;
 
-        this
+        Ok(this)
     }
 
-    pub async fn upsert(&self, artifact: &Artifact) {
+    pub async fn upsert(&self, artifact: &Artifact) -> Result<(), Error> {
         let this = self.clone();
 
         let id = format!("{}", artifact.id);
@@ -85,22 +96,27 @@ impl Store {
         let author = format!("{}", artifact.author);
 
         let mut data_bytes = vec![];
-        data_bytes.write_data(artifact).unwrap();
+        data_bytes
+            .write_data(artifact)
+            .map_err(|e| Error::SerializationError(format!("{e:?}")))?;
 
-        tokio::task::spawn_blocking(move || {
+        // Serialize embedding chunks as a flat blob: [n_chunks: u32][dim: u32][f32 data...]
+        let embedding_blob = serialize_embedding(&artifact.embedding);
+
+        tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let connection = this.connection.blocking_lock();
 
-            let affected_rows = connection
+            connection
                 .execute(
-                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author) VALUES (?, ?, ?, ?)",
-                    params![id.as_str(), data_bytes, timestamp, author.as_str()],
+                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author, embedding) VALUES (?, ?, ?, ?, ?)",
+                    params![id.as_str(), data_bytes, timestamp, author.as_str(), embedding_blob],
                 )
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            assert_eq!(1, affected_rows);
+            Ok(())
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
     pub async fn get(&self, id: Text, data: &mut impl Decodable) -> Result<(), Error> {
@@ -117,10 +133,13 @@ impl Store {
                 .ok()
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
         .ok_or(Error::NotFound)?;
 
-        data_bytes.as_slice().read_data_into(data).unwrap();
+        data_bytes
+            .as_slice()
+            .read_data_into(data)
+            .map_err(|e| Error::SerializationError(format!("{e:?}")))?;
 
         Ok(())
     }
@@ -133,34 +152,41 @@ impl Store {
         &self,
         model: &mut TextEmbeddingModel,
         mut on_progress: impl FnMut(usize, usize),
-    ) {
+    ) -> Result<(), Error> {
         let this = self.clone();
 
         // Find all unembedded artifacts.
         let unembedded: Vec<(String, Artifact)> = tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = connection
-                .prepare("SELECT id, data FROM artifacts")
-                .unwrap();
-            let rows = statement
-                .query_map([], |row| {
-                    let id: String = row.get(0).unwrap();
-                    let data: Vec<u8> = row.get(1).unwrap();
-                    let artifact: Artifact = data.as_slice().read_data().unwrap();
-
-                    if artifact.embedding.is_empty() {
-                        Ok(Some((id, artifact)))
-                    } else {
-                        Ok(None)
-                    }
-                })
-                .unwrap();
+            let mut statement = match connection.prepare("SELECT id, data FROM artifacts") {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("failed to prepare embed_pending query: {e}");
+                    return vec![];
+                }
+            };
+            let rows = match statement.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let data: Vec<u8> = row.get(1)?;
+                Ok((id, data))
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("failed to query artifacts: {e}");
+                    return vec![];
+                }
+            };
 
             rows.into_iter()
                 .filter_map(|row| {
-                    if let Ok(Some(row)) = row {
-                        Some(row)
+                    let (id, data) = row.ok()?;
+                    let artifact: Artifact = match data.as_slice().read_data() {
+                        Ok(a) => a,
+                        Err(_) => return None,
+                    };
+                    if artifact.embedding.is_empty() {
+                        Some((id, artifact))
                     } else {
                         None
                     }
@@ -168,7 +194,7 @@ impl Store {
                 .collect::<Vec<_>>()
         })
         .await
-        .unwrap();
+        .map_err(|e| Error::SpawnError(e.to_string()))?;
 
         let total = unembedded.len();
         info!("embedding {} artifacts", total);
@@ -176,157 +202,333 @@ impl Store {
 
         for (i, (_artifact_id, mut artifact)) in unembedded.into_iter().enumerate() {
             let text = format!("{}", artifact.contents);
-            artifact.embedding = embed_with_chunking(model, &text);
-            self.upsert(&artifact).await;
+            artifact.embedding = embed_with_chunking(model, &text, 0);
+            self.upsert(&artifact).await?;
             on_progress(i + 1, total);
 
             if i % 50 == 0 {
                 info!("embedded {i} artifacts...");
             }
         }
+
+        Ok(())
     }
 
     /// Returns all artifacts that have embeddings.
-    pub async fn all_embedded(&self) -> Vec<Artifact> {
+    pub async fn all_embedded(&self) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = connection.prepare("SELECT data FROM artifacts").unwrap();
+            let mut statement = connection
+                .prepare("SELECT data FROM artifacts")
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
                 .query_map([], |row| {
-                    let data: Vec<u8> = row.get(0).unwrap();
-                    let artifact: Artifact = data.as_slice().read_data().unwrap();
-                    Ok(artifact)
+                    let data: Vec<u8> = row.get(0)?;
+                    Ok(data)
                 })
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            rows.into_iter()
-                .filter_map(|r| r.ok())
-                .filter(|a| !a.embedding.is_empty())
-                .collect()
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let data = r.ok()?;
+                    let artifact: Artifact = data.as_slice().read_data().ok()?;
+                    if artifact.embedding.is_empty() {
+                        None
+                    } else {
+                        Some(artifact)
+                    }
+                })
+                .collect())
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
     /// Returns a random sample of up to `limit` artifacts from the store.
-    pub async fn sample(&self, limit: usize) -> Vec<Artifact> {
+    pub async fn sample(&self, limit: usize) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
             let mut statement = connection
                 .prepare("SELECT data FROM artifacts ORDER BY RANDOM() LIMIT ?")
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
                 .query_map(params![limit], |row| {
-                    let data: Vec<u8> = row.get(0).unwrap();
-                    let artifact: Artifact = data.as_slice().read_data().unwrap();
-                    Ok(artifact)
+                    let data: Vec<u8> = row.get(0)?;
+                    Ok(data)
                 })
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            rows.into_iter().filter_map(|r| r.ok()).collect()
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let data = r.ok()?;
+                    data.as_slice().read_data().ok()
+                })
+                .collect())
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
     /// Finds the `top_k` artifacts most similar to `query` in the datastore.
+    ///
+    /// Uses a two-phase approach to avoid loading all artifact data into memory:
+    /// 1. Load only (id, embedding_blob) pairs — compact
+    /// 2. Compute similarity in Rust, pick top-k IDs
+    /// 3. Load full artifact data only for the top-k
     pub async fn search(
         &self,
         model: &mut TextEmbeddingModel,
         query: &str,
         top_k: usize,
-    ) -> Vec<Artifact> {
-        let this = self.clone();
+    ) -> Result<Vec<Artifact>, Error> {
+        // Embed the query.
+        let query_embedding = model
+            .embed(&[query])
+            .map_err(|e| Error::EmbeddingError(format!("{e:?}")))?
+            .pop()
+            .ok_or_else(|| Error::EmbeddingError("no embedding returned".into()))?;
 
-        // Find all embedded artifacts.
-        let embedded: Vec<Artifact> = tokio::task::spawn_blocking(move || {
+        // Phase 1: Load only (id, embedding_blob) — much smaller than full data.
+        let this = self.clone();
+        let scored_ids: Vec<(String, f32)> = tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = connection.prepare("SELECT data FROM artifacts").unwrap();
+            let mut statement = connection
+                .prepare("SELECT id, embedding FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0")
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
                 .query_map([], |row| {
-                    let data: Vec<u8> = row.get(0).unwrap();
-                    let artifact: Artifact = data.as_slice().read_data().unwrap();
-                    Ok(artifact)
+                    let id: String = row.get(0)?;
+                    let emb_blob: Vec<u8> = row.get(1)?;
+                    Ok((id, emb_blob))
                 })
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            rows.into_iter()
-                .filter_map(|r| r.ok())
-                .filter(|a| !a.embedding.is_empty())
-                .collect::<Vec<_>>()
+            let mut scored = Vec::new();
+            for (id, emb_blob) in rows.flatten() {
+                let chunks = deserialize_embedding(&emb_blob);
+                if !chunks.is_empty() {
+                    let score = best_chunk_score(&chunks, &query_embedding);
+                    scored.push((id, score));
+                }
+            }
+
+            // Sort and truncate to top-k.
+            scored.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
+            scored.truncate(top_k);
+            Ok(scored)
         })
         .await
-        .unwrap();
+        .map_err(|e| Error::SpawnError(e.to_string()))??;
 
-        // Embed the query.
-        let query_embedding = model.embed(&[query]).unwrap().pop().unwrap();
+        if scored_ids.is_empty() {
+            return Ok(vec![]);
+        }
 
-        // Score each artifact by its best-matching chunk embedding.
-        let mut artifacts: Vec<_> = embedded
+        // Phase 2: Load full artifact data only for top-k IDs.
+        let ids: Vec<String> = scored_ids.iter().map(|(id, _)| id.clone()).collect();
+        let this = self.clone();
+        let mut artifacts: Vec<Artifact> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
+                let connection = this.connection.blocking_lock();
+
+                let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!("SELECT data FROM artifacts WHERE id IN ({placeholders})");
+                let mut statement = connection
+                    .prepare(&sql)
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+                let param_refs: Vec<&dyn duckdb::types::ToSql> =
+                    ids.iter().map(|s| s as &dyn duckdb::types::ToSql).collect();
+                let rows = statement
+                    .query_map(param_refs.as_slice(), |row| {
+                        let data: Vec<u8> = row.get(0)?;
+                        Ok(data)
+                    })
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+                Ok(rows
+                    .into_iter()
+                    .filter_map(|r| {
+                        let data = r.ok()?;
+                        data.as_slice().read_data().ok()
+                    })
+                    .collect())
+            })
+            .await
+            .map_err(|e| Error::SpawnError(e.to_string()))??;
+
+        // Re-sort by score (DB may return in different order).
+        let id_to_score: std::collections::HashMap<String, f32> = scored_ids.into_iter().collect();
+        artifacts.sort_by(|a, b| {
+            let sa = id_to_score
+                .get(format!("{}", a.id).as_str())
+                .copied()
+                .unwrap_or(0.0);
+            let sb = id_to_score
+                .get(format!("{}", b.id).as_str())
+                .copied()
+                .unwrap_or(0.0);
+            sa.total_cmp(&sb).reverse()
+        });
+
+        Ok(artifacts)
+    }
+
+    /// Returns scored artifacts for MMR re-ranking. Loads only embedding blobs
+    /// from the DB, scores them, returns the top candidates with their embeddings
+    /// still attached (needed for MMR inter-similarity computation).
+    pub async fn search_candidates(
+        &self,
+        query_embedding: &[f32],
+        candidate_limit: usize,
+    ) -> Result<Vec<(String, f32, Artifact)>, Error> {
+        let this = self.clone();
+        let query_emb = query_embedding.to_vec();
+
+        // Phase 1: Score all embeddings, keep top candidates.
+        let scored_ids: Vec<(String, f32)> = tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
+            let connection = this.connection.blocking_lock();
+
+            let mut statement = connection
+                .prepare("SELECT id, embedding FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0")
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            let rows = statement
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let emb_blob: Vec<u8> = row.get(1)?;
+                    Ok((id, emb_blob))
+                })
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+            let mut scored = Vec::new();
+            for (id, emb_blob) in rows.flatten() {
+                let chunks = deserialize_embedding(&emb_blob);
+                if !chunks.is_empty() {
+                    let score = best_chunk_score(&chunks, &query_emb);
+                    scored.push((id, score));
+                }
+            }
+            scored.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
+            scored.truncate(candidate_limit);
+            Ok(scored)
+        })
+        .await
+        .map_err(|e| Error::SpawnError(e.to_string()))??;
+
+        if scored_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Phase 2: Load full artifact data for candidates.
+        let ids: Vec<String> = scored_ids.iter().map(|(id, _)| id.clone()).collect();
+        let this = self.clone();
+        let artifacts: Vec<Artifact> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
+                let connection = this.connection.blocking_lock();
+
+                let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!("SELECT data FROM artifacts WHERE id IN ({placeholders})");
+                let mut statement = connection
+                    .prepare(&sql)
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+                let param_refs: Vec<&dyn duckdb::types::ToSql> =
+                    ids.iter().map(|s| s as &dyn duckdb::types::ToSql).collect();
+                let rows = statement
+                    .query_map(param_refs.as_slice(), |row| {
+                        let data: Vec<u8> = row.get(0)?;
+                        Ok(data)
+                    })
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+                Ok(rows
+                    .into_iter()
+                    .filter_map(|r| {
+                        let data = r.ok()?;
+                        data.as_slice().read_data().ok()
+                    })
+                    .collect())
+            })
+            .await
+            .map_err(|e| Error::SpawnError(e.to_string()))??;
+
+        // Build result with scores.
+        let id_to_score: std::collections::HashMap<String, f32> = scored_ids.into_iter().collect();
+        let mut result: Vec<(String, f32, Artifact)> = artifacts
             .into_iter()
-            .map(|artifact| {
-                let score = best_chunk_score(&artifact.embedding, &query_embedding);
-                (score, artifact)
+            .map(|a| {
+                let id_str = format!("{}", a.id);
+                let score = id_to_score.get(&id_str).copied().unwrap_or(0.0);
+                (id_str, score, a)
             })
             .collect();
-        artifacts.sort_by(|a, b| a.0.total_cmp(&b.0).reverse());
-
-        // Truncate to top-k.
-        artifacts.truncate(top_k);
-        artifacts
-            .into_iter()
-            .map(|(_, artifact)| artifact)
-            .collect()
+        result.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
+        Ok(result)
     }
 
     /// Returns the total number of artifacts in the store.
-    pub async fn count(&self) -> usize {
+    pub async fn count(&self) -> Result<usize, Error> {
         let this = self.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let connection = this.connection.blocking_lock();
-            connection
+            let count = connection
                 .query_row("SELECT COUNT(*) FROM artifacts", [], |row| {
                     row.get::<_, i64>(0)
                 })
-                .unwrap() as usize
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            Ok(count as usize)
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
     /// Browses artifacts ordered by timestamp.
-    pub async fn browse(&self, offset: usize, limit: usize, order: BrowseOrder) -> Vec<Artifact> {
+    pub async fn browse(
+        &self,
+        offset: usize,
+        limit: usize,
+        order: BrowseOrder,
+    ) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
         let order_sql = order.sql().to_string();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
             let sql = format!(
                 "SELECT data FROM artifacts ORDER BY COALESCE(timestamp, 0) {} LIMIT ? OFFSET ?",
                 order_sql,
             );
-            let mut statement = connection.prepare(&sql).unwrap();
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
                 .query_map(params![limit as i64, offset as i64], |row| {
-                    let data: Vec<u8> = row.get(0).unwrap();
-                    let artifact: Artifact = data.as_slice().read_data().unwrap();
-                    Ok(artifact)
+                    let data: Vec<u8> = row.get(0)?;
+                    Ok(data)
                 })
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            rows.into_iter().filter_map(|r| r.ok()).collect()
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let data = r.ok()?;
+                    data.as_slice().read_data().ok()
+                })
+                .collect())
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
     /// Filters artifacts by author and/or time range.
@@ -336,10 +538,10 @@ impl Store {
         after: Option<u64>,
         before: Option<u64>,
         limit: usize,
-    ) -> Vec<Artifact> {
+    ) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
             let has_author = author.is_some();
@@ -357,7 +559,7 @@ impl Store {
                      AND (NOT ? OR timestamp <= ?) \
                      ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?",
                 )
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             let rows = statement
                 .query_map(
@@ -371,23 +573,36 @@ impl Store {
                         limit as i64,
                     ],
                     |row| {
-                        let data: Vec<u8> = row.get(0).unwrap();
-                        let artifact: Artifact = data.as_slice().read_data().unwrap();
-                        Ok(artifact)
+                        let data: Vec<u8> = row.get(0)?;
+                        Ok(data)
                     },
                 )
-                .unwrap();
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            rows.into_iter().filter_map(|r| r.ok()).collect()
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let data = r.ok()?;
+                    data.as_slice().read_data().ok()
+                })
+                .collect())
         })
         .await
-        .unwrap()
+        .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 }
 
+/// Maximum recursion depth for embedding chunking.
+const MAX_CHUNK_DEPTH: usize = 8;
+
 /// Embeds `text`, chunking only if the model's context window is exceeded.
 /// Returns one embedding per chunk.
-fn embed_with_chunking(model: &mut TextEmbeddingModel, text: &str) -> Vec<Vec<f32>> {
+fn embed_with_chunking(model: &mut TextEmbeddingModel, text: &str, depth: usize) -> Vec<Vec<f32>> {
+    if depth >= MAX_CHUNK_DEPTH {
+        warn!("chunking depth limit ({MAX_CHUNK_DEPTH}) reached, returning unchunked");
+        return vec![];
+    }
+
     match model.embed(&[text]) {
         Ok(embeddings) => embeddings,
         Err(curtana_infers::Error::ContextSize { maximum, actual })
@@ -411,12 +626,65 @@ fn embed_with_chunking(model: &mut TextEmbeddingModel, text: &str) -> Vec<Vec<f3
                     }
                     // Recurse: character-based splitting is approximate,
                     // so some chunks may still exceed the token limit.
-                    embed_with_chunking(model, chunk)
+                    embed_with_chunking(model, chunk, depth + 1)
                 })
                 .collect()
         }
-        Err(e) => panic!("embedding failed: {e:?}"),
+        Err(e) => {
+            warn!("embedding failed: {e:?}");
+            vec![]
+        }
     }
+}
+
+/// Serializes chunk embeddings to a flat blob format.
+fn serialize_embedding(chunks: &[Vec<f32>]) -> Vec<u8> {
+    if chunks.is_empty() {
+        return vec![];
+    }
+    let n_chunks = chunks.len() as u32;
+    let dim = chunks.first().map(|c| c.len() as u32).unwrap_or(0);
+    let mut blob = Vec::with_capacity(8 + (n_chunks as usize) * (dim as usize) * 4);
+    blob.extend_from_slice(&n_chunks.to_le_bytes());
+    blob.extend_from_slice(&dim.to_le_bytes());
+    for chunk in chunks {
+        for &val in chunk {
+            blob.extend_from_slice(&val.to_le_bytes());
+        }
+    }
+    blob
+}
+
+/// Deserializes chunk embeddings from the flat blob format.
+fn deserialize_embedding(blob: &[u8]) -> Vec<Vec<f32>> {
+    if blob.len() < 8 {
+        return vec![];
+    }
+    let n_chunks = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    let dim = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
+
+    let expected_len = 8 + n_chunks * dim * 4;
+    if blob.len() < expected_len {
+        return vec![];
+    }
+
+    let mut chunks = Vec::with_capacity(n_chunks);
+    let mut offset = 8;
+    for _ in 0..n_chunks {
+        let mut vec = Vec::with_capacity(dim);
+        for _ in 0..dim {
+            let bytes = [
+                blob[offset],
+                blob[offset + 1],
+                blob[offset + 2],
+                blob[offset + 3],
+            ];
+            vec.push(f32::from_le_bytes(bytes));
+            offset += 4;
+        }
+        chunks.push(vec);
+    }
+    chunks
 }
 
 /// Truncates `text` to at most `max_bytes` bytes, breaking on a UTF-8
@@ -449,7 +717,7 @@ fn char_chunks(text: &str, byte_budget: usize) -> Vec<&str> {
 
 /// Returns the highest cosine similarity between any chunk embedding
 /// and the query embedding.
-fn best_chunk_score(chunk_embeddings: &[Vec<f32>], query: &[f32]) -> f32 {
+pub fn best_chunk_score(chunk_embeddings: &[Vec<f32>], query: &[f32]) -> f32 {
     chunk_embeddings
         .iter()
         .map(|chunk| curtana_infers::cosine_distance(chunk, query))
@@ -457,14 +725,33 @@ fn best_chunk_score(chunk_embeddings: &[Vec<f32>], query: &[f32]) -> f32 {
 }
 
 /// Opens a taxonomy-specific store at `{data_dir}/{taxonomy_name}.duckdb`.
-pub async fn open_taxonomy_store(data_dir: &Path, taxonomy_name: &str) -> Store {
+pub async fn open_taxonomy_store(data_dir: &Path, taxonomy_name: &str) -> Result<Store, Error> {
     let path = data_dir.join(format!("{taxonomy_name}.duckdb"));
-    Store::new(Some(path.to_str().unwrap())).await
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| Error::DatabaseError("non-UTF8 path".into()))?;
+    Store::new(Some(path_str)).await
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
     NotFound,
+    DatabaseError(String),
+    SerializationError(String),
+    EmbeddingError(String),
+    SpawnError(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::NotFound => write!(f, "not found"),
+            Error::DatabaseError(e) => write!(f, "database error: {e}"),
+            Error::SerializationError(e) => write!(f, "serialization error: {e}"),
+            Error::EmbeddingError(e) => write!(f, "embedding error: {e}"),
+            Error::SpawnError(e) => write!(f, "task spawn error: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -506,7 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn smoke() {
-        let store = Store::new(None).await;
+        let store = Store::new(None).await.unwrap();
 
         let artifact = Artifact {
             id: "abc".into(),
@@ -516,7 +803,7 @@ mod tests {
             embedding: vec![],
         };
 
-        store.upsert(&artifact).await;
+        store.upsert(&artifact).await.unwrap();
 
         let mut found = Artifact {
             id: Text::EMPTY,
@@ -539,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn count_browse_filter() {
-        let store = Store::new(None).await;
+        let store = Store::new(None).await.unwrap();
 
         // Insert a few artifacts.
         for i in 0..3 {
@@ -550,38 +837,42 @@ mod tests {
                 contents: format!("content {i}").into(),
                 embedding: vec![],
             };
-            store.upsert(&artifact).await;
+            store.upsert(&artifact).await.unwrap();
         }
 
-        assert_eq!(store.count().await, 3);
+        assert_eq!(store.count().await.unwrap(), 3);
 
         // Browse descending.
-        let browsed = store.browse(0, 10, BrowseOrder::Desc).await;
+        let browsed = store.browse(0, 10, BrowseOrder::Desc).await.unwrap();
         assert_eq!(browsed.len(), 3);
         assert_eq!(browsed[0].timestamp, 1002);
 
         // Browse ascending.
-        let browsed = store.browse(0, 10, BrowseOrder::Asc).await;
+        let browsed = store.browse(0, 10, BrowseOrder::Asc).await.unwrap();
         assert_eq!(browsed[0].timestamp, 1000);
 
         // Browse with offset/limit.
-        let browsed = store.browse(1, 1, BrowseOrder::Desc).await;
+        let browsed = store.browse(1, 1, BrowseOrder::Desc).await.unwrap();
         assert_eq!(browsed.len(), 1);
         assert_eq!(browsed[0].timestamp, 1001);
 
         // Filter by author.
         let filtered = store
             .filter(Some("alice".to_string()), None, None, 10)
-            .await;
+            .await
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(format!("{}", filtered[0].id), "art-0");
 
         // Filter by time range.
-        let filtered = store.filter(None, Some(1001), Some(1002), 10).await;
+        let filtered = store
+            .filter(None, Some(1001), Some(1002), 10)
+            .await
+            .unwrap();
         assert_eq!(filtered.len(), 2);
 
         // Filter with limit.
-        let filtered = store.filter(None, None, None, 2).await;
+        let filtered = store.filter(None, None, None, 2).await.unwrap();
         assert_eq!(filtered.len(), 2);
     }
 }

@@ -18,15 +18,16 @@ struct Models {
     embed: TextEmbeddingModel,
 }
 
-fn load_models(config: &Config) -> Models {
-    let registry = ModelRegistry::new().expect("failed to init model registry");
+fn load_models(config: &Config) -> Result<Models, String> {
+    let registry =
+        ModelRegistry::new().map_err(|e| format!("failed to init model registry: {e:?}"))?;
     let chat = registry
         .load_chat_model(&config.chat_model, "You are a helpful assistant.")
-        .expect("failed to load chat model");
+        .map_err(|e| format!("failed to load chat model: {e:?}"))?;
     let embed = registry
         .load_text_embedding_model(&config.embed_model)
-        .expect("failed to load embedding model");
-    Models { chat, embed }
+        .map_err(|e| format!("failed to load embedding model: {e:?}"))?;
+    Ok(Models { chat, embed })
 }
 
 /// Runs the full ingest pipeline headlessly, logging progress via tracing.
@@ -34,14 +35,26 @@ pub async fn ingest(config: &Config) {
     let data_dir = Path::new(config.data_dir());
     let manifest_path = data_dir.join("manifest.toml");
 
-    let mut manifest = Manifest::load(&manifest_path).expect("failed to load manifest");
+    let mut manifest = match Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to load manifest: {e}");
+            return;
+        }
+    };
 
     if manifest.taxonomies.is_empty() {
         eprintln!("No taxonomies in manifest — run `curtana discover` first.");
         return;
     }
 
-    let mut models = load_models(config);
+    let mut models = match load_models(config) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -56,7 +69,13 @@ pub async fn ingest(config: &Config) {
         info!("Ingesting {taxonomy_name}...");
 
         let artifacts = match find_source(config, &entry.source_type) {
-            Some(source) => fetch_artifacts(source, &entry.source_id).await,
+            Some(source) => match fetch_artifacts(source, &entry.source_id).await {
+                Ok(a) => a,
+                Err(e) => {
+                    info!("  Fetch error: {e}, skipping.");
+                    continue;
+                }
+            },
             None => {
                 info!("  No matching source config, skipping.");
                 continue;
@@ -65,13 +84,25 @@ pub async fn ingest(config: &Config) {
 
         info!("  Fetched {} artifacts.", artifacts.len());
 
-        let store = open_taxonomy_store(data_dir, taxonomy_name).await;
+        let store = match open_taxonomy_store(data_dir, taxonomy_name).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  Error opening store for {taxonomy_name}: {e}");
+                continue;
+            }
+        };
         for artifact in &artifacts {
-            store.upsert(artifact).await;
+            if let Err(e) = store.upsert(artifact).await {
+                eprintln!("  Upsert error for {taxonomy_name}: {e}");
+                continue;
+            }
         }
 
         info!("  Embedding...");
-        store.embed_pending(&mut models.embed, |_, _| {}).await;
+        if let Err(e) = store.embed_pending(&mut models.embed, |_, _| {}).await {
+            eprintln!("  Embedding error for {taxonomy_name}: {e}");
+            continue;
+        }
 
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
             entry.last_ingested_at = Some(now);
@@ -90,55 +121,41 @@ pub async fn ingest(config: &Config) {
         info!("  Done.");
     }
 
-    manifest
-        .save(&manifest_path)
-        .expect("failed to save manifest");
+    if let Err(e) = manifest.save(&manifest_path) {
+        eprintln!("Failed to save manifest: {e}");
+        return;
+    }
 
     info!("Ingestion complete.");
 }
 
-/// Agent system prompt for the CLI gathering phase.
-const AGENT_SYSTEM_PROMPT: &str = "\
-You are a research assistant with access to a knowledge base organized into taxonomies.
-
-Available tools:
-- list_taxonomies() — List all available taxonomies with descriptions and artifact counts
-- count({\"taxonomy\": \"name\"}) — Count artifacts in a taxonomy
-- search({\"query\": \"text\", \"taxonomy\": \"name\", \"top_k\": 10}) — Semantic search for relevant artifacts. 'taxonomy' and 'top_k' are optional.
-- browse({\"taxonomy\": \"name\", \"offset\": 0, \"limit\": 5, \"order\": \"desc\"}) — Browse artifacts chronologically. 'offset', 'limit', 'order' are optional.
-- filter({\"taxonomy\": \"name\", \"author\": \"name\", \"after\": 1234567890, \"before\": 1234567890, \"limit\": 10}) — Filter artifacts by metadata. All fields except 'taxonomy' are optional.
-
-To call a tool, write exactly: <tool>tool_name({\"arg\": \"value\"})</tool>
-For tools with no arguments: <tool>list_taxonomies()</tool>
-When you have gathered enough information, write: <done/>
-
-Strategy:
-1. Start by listing taxonomies if you are unsure which to query.
-2. Use search for semantic/topic queries, browse for chronological queries, and filter for metadata queries.
-3. Gather only what you need, then write <done/>.";
-
-/// Maximum gathering turns for the CLI agent loop.
-const MAX_TURNS: usize = 5;
-
-/// Maximum accumulated bytes before stopping gathering.
-const MAX_GATHERING_BYTES: usize = 40_000;
-
-/// Maximum characters for the synthesis sources block.
-const MAX_SOURCES_CHARS_CAP: usize = 24_000;
+use crate::commands::{AGENT_SYSTEM_PROMPT, MAX_GATHERING_BYTES, MAX_SOURCES_CHARS, MAX_TURNS};
 
 /// Runs a query headlessly, printing the answer to stdout and sources to stderr.
 pub async fn query(config: &Config, query: &str) {
     let data_dir = Path::new(config.data_dir());
     let manifest_path = data_dir.join("manifest.toml");
 
-    let manifest = Manifest::load(&manifest_path).expect("failed to load manifest");
+    let manifest = match Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to load manifest: {e}");
+            return;
+        }
+    };
 
     if manifest.taxonomies.is_empty() {
         eprintln!("No taxonomies found — run `curtana discover` first.");
         return;
     }
 
-    let mut models = load_models(config);
+    let mut models = match load_models(config) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
 
     let data_dir = Path::new(config.data_dir());
 
@@ -151,16 +168,26 @@ pub async fn query(config: &Config, query: &str) {
 
 /// Agent-mode query: gathering loop then synthesis.
 async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: &mut Models) {
+    // Sanitize user input: strip sentinel tokens to prevent prompt injection.
+    let sanitized_query = query
+        .replace("<done/>", "")
+        .replace("<curtana:done/>", "")
+        .replace("<tool>", "")
+        .replace("</tool>", "");
+
     let executor = ToolExecutor::new(manifest.clone(), data_dir.to_path_buf());
 
     // === Gathering Phase ===
-    models
+    if let Err(e) = models
         .chat
         .replace_system_prompt(AGENT_SYSTEM_PROMPT.to_string())
-        .expect("failed to set agent prompt");
+    {
+        eprintln!("Failed to set agent prompt: {e:?}");
+        return;
+    }
 
     let opening_prompt = format!(
-        "The user asked: \"{query}\". Use tools to gather information, then write <done/>."
+        "The user asked: \"{sanitized_query}\". Use tools to gather information, then write <curtana:done/>."
     );
 
     let mut gathered_sources: Vec<ScoredArtifact> = Vec::new();
@@ -205,10 +232,13 @@ async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: 
 
     // === Synthesis Phase ===
     models.chat.clear_history();
-    models
+    if let Err(e) = models
         .chat
         .replace_system_prompt("You are a helpful assistant.".to_string())
-        .expect("failed to restore system prompt");
+    {
+        eprintln!("Failed to restore system prompt: {e:?}");
+        return;
+    }
 
     // If no tools were called, fall back to Router::search.
     let final_sources: Vec<ScoredArtifact>;
@@ -216,14 +246,20 @@ async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: 
 
     if gathered_sources.is_empty() {
         let router = Router::new(manifest.clone(), data_dir.to_path_buf());
-        let results = router.search(&mut models.embed, query, 15).await;
+        let results = match router.search(&mut models.embed, query, 15).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Search failed: {e}");
+                return;
+            }
+        };
         if results.is_empty() {
             eprintln!("No results found.");
             return;
         }
         let mut block = String::new();
         for ctx in &gathered_context {
-            if block.len() + ctx.len() + 2 > MAX_SOURCES_CHARS_CAP {
+            if block.len() + ctx.len() + 2 > MAX_SOURCES_CHARS {
                 break;
             }
             block.push_str(ctx);
@@ -235,7 +271,7 @@ async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: 
     } else {
         let mut block = String::new();
         for ctx in &gathered_context {
-            if block.len() + ctx.len() + 2 > MAX_SOURCES_CHARS_CAP {
+            if block.len() + ctx.len() + 2 > MAX_SOURCES_CHARS {
                 break;
             }
             if !block.is_empty() {
@@ -248,7 +284,7 @@ async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: 
     }
 
     let synthesis_prompt = format!(
-        "Based on the following sources, answer this query: \"{query}\"\n\n\
+        "Based on the following sources, answer this query: \"{sanitized_query}\"\n\n\
          {sources_block}\
          Synthesize a clear, concise answer. Cite the sources you draw from."
     );
@@ -266,7 +302,13 @@ async fn query_agent(data_dir: &Path, query: &str, manifest: &Manifest, models: 
 /// Simple (non-agent) query: single-pass search and synthesis.
 async fn query_simple(data_dir: &Path, query: &str, manifest: &Manifest, models: &mut Models) {
     let router = Router::new(manifest.clone(), data_dir.to_path_buf());
-    let results = router.search(&mut models.embed, query, 15).await;
+    let results = match router.search(&mut models.embed, query, 15).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Search failed: {e}");
+            return;
+        }
+    };
 
     if results.is_empty() {
         eprintln!("No results found.");
@@ -345,7 +387,10 @@ fn find_source<'a>(config: &'a Config, source_type: &str) -> Option<&'a SourceCo
         .find(|s| matches!((source_type, s), ("imap", SourceConfig::Imap(_))))
 }
 
-async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifact> {
+async fn fetch_artifacts(
+    source: &SourceConfig,
+    folder_name: &str,
+) -> Result<Vec<Artifact>, String> {
     match source {
         SourceConfig::Imap(base_config) => {
             let folder_config = imap::ImapConfig {
@@ -355,11 +400,14 @@ async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifa
                 password: base_config.password.clone(),
                 mailbox: Some(folder_name.to_string()),
                 sequence: base_config.sequence.clone(),
+                accept_invalid_certs: base_config.accept_invalid_certs,
             };
 
-            let emails = imap::fetch_emails(&folder_config).await;
+            let emails = imap::fetch_emails(&folder_config)
+                .await
+                .map_err(|e| e.to_string())?;
 
-            emails
+            Ok(emails
                 .into_iter()
                 .map(|email| Artifact {
                     id: email.message_id.clone().into(),
@@ -368,7 +416,7 @@ async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifa
                     contents: email.to_markdown().into(),
                     embedding: Vec::new(),
                 })
-                .collect()
+                .collect())
         }
     }
 }

@@ -21,6 +21,9 @@ chrono = "0.4"
 # Async runtime.
 tokio = { workspace = true }
 
+# Logging.
+tracing = { workspace = true }
+
 # Config.
 serde = { workspace = true }
 toml = "0.8.22"

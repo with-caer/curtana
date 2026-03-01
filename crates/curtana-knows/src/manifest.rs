@@ -78,13 +78,16 @@ impl Manifest {
     }
 
     /// Persists the manifest to `path`, creating parent directories
-    /// if necessary.
+    /// if necessary. Uses atomic write (write to temp, then rename)
+    /// to avoid partial writes.
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(self)?;
-        std::fs::write(path, contents)?;
+        let tmp_path = path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, contents)?;
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }

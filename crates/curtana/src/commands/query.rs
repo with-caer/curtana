@@ -44,7 +44,13 @@ pub(crate) async fn run(
     }
 
     let router = Router::new(manifest, data_dir.to_path_buf());
-    let results = router.search(&mut models.embed, query, 15).await;
+    let results = match router.search(&mut models.embed, query, 15).await {
+        Ok(r) => r,
+        Err(e) => {
+            tx.send(Event::Error(format!("search failed: {e}"))).ok();
+            return;
+        }
+    };
 
     if results.is_empty() {
         tx.send(Event::Error("no results found.".into())).ok();

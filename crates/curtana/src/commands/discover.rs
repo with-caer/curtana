@@ -43,7 +43,13 @@ pub(crate) async fn run(
     for source in &config.source {
         match source {
             SourceConfig::Imap(imap_config) => {
-                let discovered = imap::discover_folders(imap_config).await;
+                let discovered = match imap::discover_folders(imap_config).await {
+                    Ok(folders) => folders,
+                    Err(e) => {
+                        tx.send(Event::Error(format!("{e}"))).ok();
+                        return None;
+                    }
+                };
                 let selectable: Vec<_> =
                     discovered.into_iter().filter(|f| f.is_selectable).collect();
 
@@ -191,11 +197,18 @@ pub(crate) fn select(
 }
 
 /// Converts a folder name into a safe taxonomy name component.
+/// Returns `"unnamed"` if the result would be empty after sanitization.
 fn sanitize_name(name: &str) -> String {
-    name.to_lowercase()
+    let sanitized = name
+        .to_lowercase()
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
         .trim_matches('-')
-        .to_string()
+        .to_string();
+    if sanitized.is_empty() {
+        "unnamed".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Builds a sanitized source label from username and host.

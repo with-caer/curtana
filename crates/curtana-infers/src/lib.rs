@@ -43,16 +43,24 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn new() -> Result<Self, Error> {
-        lazy_static::lazy_static! {
-            static ref LLAMA_BACKEND: Arc<LlamaBackend> = {
-                send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-                Arc::new(LlamaBackend::init().unwrap())
-            };
-        }
+        use std::sync::OnceLock;
+        static LLAMA_BACKEND: OnceLock<Result<Arc<LlamaBackend>, String>> = OnceLock::new();
 
-        Ok(Self {
-            backend: LLAMA_BACKEND.clone(),
-        })
+        let result = LLAMA_BACKEND.get_or_init(|| {
+            send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+            LlamaBackend::init()
+                .map(Arc::new)
+                .map_err(|e| e.to_string())
+        });
+
+        match result {
+            Ok(backend) => Ok(Self {
+                backend: backend.clone(),
+            }),
+            Err(e) => Err(Error::InternalNativeError(format!(
+                "failed to initialize llama backend: {e}"
+            ))),
+        }
     }
 
     /// Load a .GGUF model from `model_path`, initializing
@@ -110,7 +118,7 @@ impl ChatModel {
         // Run inference.
         let mut inference = vec![];
         self.infer(prompt, &mut inference)?;
-        let inference = String::from_utf8(inference).unwrap();
+        let inference = String::from_utf8_lossy(&inference).into_owned();
 
         // Record input prompt in the chat history.
         self.messages.push(LlamaChatMessage::new(
@@ -139,7 +147,7 @@ impl ChatModel {
     pub fn infer_with_history_to_string(&mut self, prompt: &str) -> Result<String, Error> {
         let mut buf = Vec::new();
         self.infer_with_history(prompt, &mut buf)?;
-        Ok(String::from_utf8(buf).unwrap())
+        Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
     /// Replace the system prompt (messages[0]).
@@ -187,13 +195,21 @@ impl ChatModel {
             .new_context(&self.registry.backend, context_params)?;
 
         // Make sure the KV cache is big enough to hold all the prompt and generated tokens.
-        let n_len = DEFAULT_CONTEXT_LENGTH as i32;
+        let n_len: i32 = i32::try_from(DEFAULT_CONTEXT_LENGTH).map_err(|_| Error::ContextSize {
+            maximum: i32::MAX as usize,
+            actual: DEFAULT_CONTEXT_LENGTH,
+        })?;
         let n_cxt = context.n_ctx() as i32;
-        let n_kv_req = tokens.len() as i32 + (n_len - tokens.len() as i32);
+        let tokens_len_i32 = i32::try_from(tokens.len()).map_err(|_| Error::ContextSize {
+            maximum: i32::MAX as usize,
+            actual: tokens.len(),
+        })?;
+        let n_kv_req = tokens_len_i32 + (n_len - tokens_len_i32);
         if n_kv_req > n_cxt {
-            panic!(
-                "n_kv_req > n_ctx, the required kv cache size is not big enough either reduce n_len or increase n_ctx"
-            )
+            return Err(Error::ContextSize {
+                maximum: n_cxt as usize,
+                actual: n_kv_req as usize,
+            });
         }
 
         // Group tokens into batches.
@@ -202,8 +218,12 @@ impl ChatModel {
         // Submit initial batch for inference.
         let last_index = tokens.len() - 1;
         for (i, token) in tokens.into_iter().enumerate() {
+            let pos = i32::try_from(i).map_err(|_| Error::ContextSize {
+                maximum: i32::MAX as usize,
+                actual: i,
+            })?;
             // llama_decode will output logits only for the last token of the prompt
-            batch.add(token, i as i32, &[0], i == last_index)?;
+            batch.add(token, pos, &[0], i == last_index)?;
         }
         context.decode(&mut batch)?;
 
@@ -236,7 +256,7 @@ impl ChatModel {
 
             n_cur += 1;
 
-            context.decode(&mut batch).expect("failed to eval");
+            context.decode(&mut batch)?;
         }
 
         // Remove the prompt from the inference history.
@@ -345,6 +365,11 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
         dot += a[i] * b[i];
         dot_a += a[i] * a[i];
         dot_b += b[i] * b[i];
+    }
+
+    // Guard against zero-magnitude vectors.
+    if dot_a == 0.0 || dot_b == 0.0 {
+        return 0.0;
     }
 
     // Calculate the cosine similarity,

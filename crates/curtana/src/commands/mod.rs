@@ -73,6 +73,37 @@ pub(crate) struct Models {
 /// Maximum number of prior conversation entries to retain.
 pub(crate) const MAX_HISTORY_ENTRIES: usize = 2;
 
+/// Maximum number of tool-use turns before forcing synthesis.
+pub(crate) const MAX_TURNS: usize = 5;
+
+/// Maximum accumulated bytes (across all messages) before stopping
+/// gathering early. At ~4 chars/token, 40K chars ≈ 10K tokens, leaving
+/// 6K tokens of headroom in the 16K context window for the model's
+/// response and chat-template overhead.
+pub(crate) const MAX_GATHERING_BYTES: usize = 40_000;
+
+/// Conservative character budget for the synthesis sources block.
+pub(crate) const MAX_SOURCES_CHARS: usize = 24_000;
+
+pub(crate) const AGENT_SYSTEM_PROMPT: &str = "\
+You are a research assistant with access to a knowledge base organized into taxonomies.
+
+Available tools:
+- list_taxonomies() — List all available taxonomies with descriptions and artifact counts
+- count({\"taxonomy\": \"name\"}) — Count artifacts in a taxonomy
+- search({\"query\": \"text\", \"taxonomy\": \"name\", \"top_k\": 10}) — Semantic search for relevant artifacts. 'taxonomy' and 'top_k' are optional.
+- browse({\"taxonomy\": \"name\", \"offset\": 0, \"limit\": 5, \"order\": \"desc\"}) — Browse artifacts chronologically. 'offset', 'limit', 'order' are optional.
+- filter({\"taxonomy\": \"name\", \"author\": \"name\", \"after\": 1234567890, \"before\": 1234567890, \"limit\": 10}) — Filter artifacts by metadata. All fields except 'taxonomy' are optional.
+
+To call a tool, write exactly: <tool>tool_name({\"arg\": \"value\"})</tool>
+For tools with no arguments: <tool>list_taxonomies()</tool>
+When you have gathered enough information, write: <curtana:done/>
+
+Strategy:
+1. Start by listing taxonomies if you are unsure which to query.
+2. Use search for semantic/topic queries, browse for chronological queries, and filter for metadata queries.
+3. Gather only what you need, then write <curtana:done/>.";
+
 /// Maximum total characters for the prior-conversation context block.
 const MAX_HISTORY_CHARS: usize = 12_000;
 
@@ -148,7 +179,8 @@ pub(crate) fn condense_sources(sources_block: &str) -> String {
     if sources_block.len() <= MAX_SOURCES_PER_ENTRY {
         sources_block.to_string()
     } else {
-        let mut truncated = sources_block[..MAX_SOURCES_PER_ENTRY].to_string();
+        let mut truncated =
+            curtana_knows::truncate_text(sources_block, MAX_SOURCES_PER_ENTRY).to_string();
         truncated.push_str("...");
         truncated
     }

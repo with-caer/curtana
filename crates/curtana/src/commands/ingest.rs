@@ -54,7 +54,13 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
             &entry.source_host,
             &entry.source_username,
         ) {
-            Some(source) => fetch_artifacts(source, &entry.source_id).await,
+            Some(source) => match fetch_artifacts(source, &entry.source_id).await {
+                Ok(a) => a,
+                Err(e) => {
+                    summary_lines.push(format!("- **{taxonomy_name}**: error ({e})"));
+                    continue;
+                }
+            },
             None => {
                 summary_lines.push(format!("- **{taxonomy_name}**: skipped (no source config)"));
                 continue;
@@ -64,14 +70,23 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         let count = artifacts.len();
 
         // Upsert into taxonomy store.
-        let store = open_taxonomy_store(data_dir, taxonomy_name).await;
+        let store = match open_taxonomy_store(data_dir, taxonomy_name).await {
+            Ok(s) => s,
+            Err(e) => {
+                summary_lines.push(format!("- **{taxonomy_name}**: error opening store ({e})"));
+                continue;
+            }
+        };
         for artifact in &artifacts {
-            store.upsert(artifact).await;
+            if let Err(e) = store.upsert(artifact).await {
+                summary_lines.push(format!("- **{taxonomy_name}**: upsert error ({e})"));
+                continue;
+            }
         }
 
         // Embed pending artifacts.
         let embed_label = format!("Embedding {taxonomy_name}");
-        store
+        if let Err(e) = store
             .embed_pending(&mut models.embed, |current, total| {
                 tx.send(Event::Progress(Progress {
                     current,
@@ -80,7 +95,11 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
                 }))
                 .ok();
             })
-            .await;
+            .await
+        {
+            summary_lines.push(format!("- **{taxonomy_name}**: embedding error ({e})"));
+            continue;
+        }
 
         // Update ingestion timestamp.
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
@@ -133,7 +152,10 @@ fn find_source<'a>(
 }
 
 /// Fetches artifacts from a source folder.
-async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifact> {
+async fn fetch_artifacts(
+    source: &SourceConfig,
+    folder_name: &str,
+) -> Result<Vec<Artifact>, String> {
     match source {
         SourceConfig::Imap(base_config) => {
             let folder_config = imap::ImapConfig {
@@ -143,11 +165,14 @@ async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifa
                 password: base_config.password.clone(),
                 mailbox: Some(folder_name.to_string()),
                 sequence: base_config.sequence.clone(),
+                accept_invalid_certs: base_config.accept_invalid_certs,
             };
 
-            let emails = imap::fetch_emails(&folder_config).await;
+            let emails = imap::fetch_emails(&folder_config)
+                .await
+                .map_err(|e| e.to_string())?;
 
-            emails
+            Ok(emails
                 .into_iter()
                 .map(|email| Artifact {
                     id: email.message_id.clone().into(),
@@ -156,7 +181,7 @@ async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifa
                     contents: email.to_markdown().into(),
                     embedding: Vec::new(),
                 })
-                .collect()
+                .collect())
         }
     }
 }

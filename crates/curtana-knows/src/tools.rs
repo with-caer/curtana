@@ -43,8 +43,8 @@ pub struct ToolResult {
 pub fn parse_tool_response(output: &str) -> ParseResult {
     let trimmed = output.trim();
 
-    // Check for <done/>.
-    if trimmed.contains("<done/>") {
+    // Check for <curtana:done/> (preferred) or legacy <done/>.
+    if trimmed.contains("<curtana:done/>") || trimmed.contains("<done/>") {
         return ParseResult::Done;
     }
 
@@ -103,11 +103,39 @@ impl ToolExecutor {
         Self { manifest, data_dir }
     }
 
+    /// Validates common tool arguments. Returns `Some(error_message)` if invalid.
+    fn validate_args(&self, args: &serde_json::Value) -> Option<String> {
+        if let Some(top_k) = args.get("top_k").and_then(|v| v.as_u64())
+            && (top_k == 0 || top_k > 100)
+        {
+            return Some(format!("top_k must be between 1 and 100, got {top_k}"));
+        }
+        if let Some(limit) = args.get("limit").and_then(|v| v.as_u64())
+            && (limit == 0 || limit > 100)
+        {
+            return Some(format!("limit must be between 1 and 100, got {limit}"));
+        }
+        if let Some(author) = args.get("author").and_then(|v| v.as_str())
+            && author.trim().is_empty()
+        {
+            return Some("author must be non-empty".to_string());
+        }
+        None
+    }
+
     pub async fn execute(
         &self,
         embed_model: &mut TextEmbeddingModel,
         call: &ToolCall,
     ) -> ToolResult {
+        // Validate common arguments before dispatching.
+        if let Some(err) = self.validate_args(&call.args) {
+            return ToolResult {
+                text: err,
+                sources: vec![],
+            };
+        }
+
         let mut result = match call.name.as_str() {
             "list_taxonomies" => self.list_taxonomies().await,
             "count" => self.tool_count(&call.args).await,
@@ -132,8 +160,14 @@ impl ToolExecutor {
     async fn list_taxonomies(&self) -> ToolResult {
         let mut lines = Vec::new();
         for (name, entry) in &self.manifest.taxonomies {
-            let store = open_taxonomy_store(&self.data_dir, name).await;
-            let count = store.count().await;
+            let store = match open_taxonomy_store(&self.data_dir, name).await {
+                Ok(s) => s,
+                Err(e) => {
+                    lines.push(format!("{name}: error ({e})"));
+                    continue;
+                }
+            };
+            let count = store.count().await.unwrap_or(0);
             let desc = if entry.description.is_empty() {
                 "(no description)"
             } else {
@@ -159,8 +193,14 @@ impl ToolExecutor {
                 sources: vec![],
             };
         }
-        let store = open_taxonomy_store(&self.data_dir, taxonomy).await;
-        let count = store.count().await;
+        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+            Ok(s) => s,
+            Err(e) => return err_result(e),
+        };
+        let count = match store.count().await {
+            Ok(c) => c,
+            Err(e) => return err_result(e),
+        };
         ToolResult {
             text: format!("{taxonomy}: {count} artifacts"),
             sources: vec![],
@@ -190,8 +230,14 @@ impl ToolExecutor {
                     sources: vec![],
                 };
             }
-            let store = open_taxonomy_store(&self.data_dir, taxonomy).await;
-            let artifacts = store.search(embed_model, query, top_k).await;
+            let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+                Ok(s) => s,
+                Err(e) => return err_result(e),
+            };
+            let artifacts = match store.search(embed_model, query, top_k).await {
+                Ok(a) => a,
+                Err(e) => return err_result(e),
+            };
             artifacts
                 .into_iter()
                 .map(|a| ScoredArtifact {
@@ -202,7 +248,10 @@ impl ToolExecutor {
                 .collect()
         } else {
             let router = Router::new(self.manifest.clone(), self.data_dir.clone());
-            router.search(embed_model, query, top_k).await
+            match router.search(embed_model, query, top_k).await {
+                Ok(r) => r,
+                Err(e) => return err_result(e),
+            }
         };
 
         let text = format_artifacts(&results);
@@ -228,8 +277,14 @@ impl ToolExecutor {
             };
         }
 
-        let store = open_taxonomy_store(&self.data_dir, taxonomy).await;
-        let artifacts = store.browse(offset, limit, order).await;
+        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+            Ok(s) => s,
+            Err(e) => return err_result(e),
+        };
+        let artifacts = match store.browse(offset, limit, order).await {
+            Ok(a) => a,
+            Err(e) => return err_result(e),
+        };
 
         let text = artifacts
             .iter()
@@ -262,8 +317,14 @@ impl ToolExecutor {
             };
         }
 
-        let store = open_taxonomy_store(&self.data_dir, taxonomy).await;
-        let artifacts = store.filter(author, after, before, limit).await;
+        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+            Ok(s) => s,
+            Err(e) => return err_result(e),
+        };
+        let artifacts = match store.filter(author, after, before, limit).await {
+            Ok(a) => a,
+            Err(e) => return err_result(e),
+        };
 
         let text = artifacts
             .iter()
@@ -280,6 +341,13 @@ impl ToolExecutor {
             },
             sources: vec![],
         }
+    }
+}
+
+fn err_result(e: crate::Error) -> ToolResult {
+    ToolResult {
+        text: format!("Error: {e}"),
+        sources: vec![],
     }
 }
 

@@ -50,7 +50,13 @@ enum SubCmd {
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let config = Arc::new(Config::load(&cli.config));
+    let config = match Config::load(&cli.config) {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     match cli.command {
         None => run_tui(config, None).await,

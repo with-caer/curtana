@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use curtana_infers::{ChatModel, TextEmbeddingModel};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::{Artifact, best_chunk_score, manifest::Manifest, open_taxonomy_store};
+use crate::{Artifact, manifest::Manifest, open_taxonomy_store};
 
 /// Trade-off between relevance and diversity in MMR selection.
 /// 1.0 = pure relevance (equivalent to top-k), 0.0 = pure diversity.
@@ -66,7 +66,13 @@ impl Router {
         }
 
         let descriptions: Vec<&str> = entries.iter().map(|(_, desc)| *desc).collect();
-        let desc_embeddings = embed_model.embed(&descriptions).unwrap();
+        let desc_embeddings = match embed_model.embed(&descriptions) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("failed to embed taxonomy descriptions: {e:?}, falling back to all");
+                return self.manifest.taxonomies.keys().cloned().collect();
+            }
+        };
 
         let mut scored: Vec<(&String, f32)> = entries
             .iter()
@@ -90,23 +96,48 @@ impl Router {
 
     /// Routes the query to the most relevant taxonomies, then searches
     /// and reranks using MMR.
+    ///
+    /// Uses DB-level search to avoid loading all artifacts into memory:
+    /// each taxonomy store returns only the top candidates, which are then
+    /// merged and re-ranked with MMR.
     pub async fn search(
         &self,
         embed_model: &mut TextEmbeddingModel,
         query: &str,
         top_k: usize,
-    ) -> Vec<ScoredArtifact> {
-        let query_embedding = embed_model.embed(&[query]).unwrap().pop().unwrap();
+    ) -> Result<Vec<ScoredArtifact>, crate::Error> {
+        let query_embedding = embed_model
+            .embed(&[query])
+            .map_err(|e| crate::Error::EmbeddingError(format!("{e:?}")))?
+            .pop()
+            .ok_or_else(|| crate::Error::EmbeddingError("no embedding returned".into()))?;
         let taxonomy_names = self.route(embed_model, &query_embedding);
 
+        // Fetch more candidates than top_k from each store to give MMR
+        // enough diversity to work with, but still bounded.
+        let candidate_limit = top_k * 3;
         let mut all_scored = Vec::new();
 
         for name in &taxonomy_names {
-            let store = open_taxonomy_store(&self.data_dir, name).await;
-            let artifacts = store.all_embedded().await;
+            let store = match open_taxonomy_store(&self.data_dir, name).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("failed to open store for {name}: {e}");
+                    continue;
+                }
+            };
+            let candidates = match store
+                .search_candidates(&query_embedding, candidate_limit)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("failed to search store for {name}: {e}");
+                    continue;
+                }
+            };
 
-            for artifact in artifacts {
-                let score = best_chunk_score(&artifact.embedding, &query_embedding);
+            for (_id, score, artifact) in candidates {
                 all_scored.push(ScoredArtifact {
                     taxonomy: name.clone(),
                     score,
@@ -116,7 +147,12 @@ impl Router {
         }
 
         all_scored.retain(|s| s.score > MIN_SIMILARITY);
-        mmr_select(all_scored, top_k, MMR_LAMBDA, taxonomy_names.len())
+        Ok(mmr_select(
+            all_scored,
+            top_k,
+            MMR_LAMBDA,
+            taxonomy_names.len(),
+        ))
     }
 }
 
@@ -211,7 +247,13 @@ pub async fn generate_description(
     chat_model: &mut ChatModel,
     sample_size: usize,
 ) -> String {
-    let samples = store.sample(sample_size).await;
+    let samples = match store.sample(sample_size).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("failed to sample artifacts for description: {e}");
+            return String::new();
+        }
+    };
 
     if samples.is_empty() {
         return String::new();
@@ -243,6 +285,9 @@ pub async fn generate_description(
     );
 
     let mut output = Vec::new();
-    chat_model.infer(&prompt, &mut output).unwrap();
+    if let Err(e) = chat_model.infer(&prompt, &mut output) {
+        warn!("failed to generate description: {e:?}");
+        return String::new();
+    }
     String::from_utf8_lossy(&output).trim().to_string()
 }

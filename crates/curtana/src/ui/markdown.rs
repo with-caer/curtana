@@ -4,7 +4,16 @@ use ratatui::text::{Line, Span};
 
 /// Converts a markdown string into styled ratatui `Line`s.
 pub fn to_lines(input: &str) -> Vec<Line<'static>> {
-    let tree = to_mdast(input, &ParseOptions::default()).unwrap();
+    let tree = match to_mdast(input, &ParseOptions::default()) {
+        Ok(tree) => tree,
+        Err(_) => {
+            // Markdown parse failed — return the input as plain text.
+            return input
+                .lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect();
+        }
+    };
     let mut ctx = RenderContext::default();
     ctx.render_node(&tree);
     ctx.lines

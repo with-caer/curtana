@@ -8,40 +8,9 @@ use tokio::sync::mpsc;
 use crate::event::{ChannelWriter, CommandResult, Event};
 
 use super::{
-    ConversationEntry, MAX_HISTORY_ENTRIES, Models, TeeWriter, condense_sources,
-    format_conversation_context,
+    AGENT_SYSTEM_PROMPT, ConversationEntry, MAX_GATHERING_BYTES, MAX_HISTORY_ENTRIES,
+    MAX_SOURCES_CHARS, MAX_TURNS, Models, TeeWriter, condense_sources, format_conversation_context,
 };
-
-/// Maximum number of tool-use turns before forcing synthesis.
-const MAX_TURNS: usize = 5;
-
-/// Maximum accumulated bytes (across all messages) before stopping
-/// gathering early. At ~4 chars/token, 40K chars ≈ 10K tokens, leaving
-/// 6K tokens of headroom in the 16K context window for the model's
-/// response and chat-template overhead.
-const MAX_GATHERING_BYTES: usize = 40_000;
-
-/// Conservative character budget for the synthesis sources block.
-const MAX_SOURCES_CHARS: usize = 24_000;
-
-const AGENT_SYSTEM_PROMPT: &str = "\
-You are a research assistant with access to a knowledge base organized into taxonomies.
-
-Available tools:
-- list_taxonomies() — List all available taxonomies with descriptions and artifact counts
-- count({\"taxonomy\": \"name\"}) — Count artifacts in a taxonomy
-- search({\"query\": \"text\", \"taxonomy\": \"name\", \"top_k\": 10}) — Semantic search for relevant artifacts. 'taxonomy' and 'top_k' are optional.
-- browse({\"taxonomy\": \"name\", \"offset\": 0, \"limit\": 5, \"order\": \"desc\"}) — Browse artifacts chronologically. 'offset', 'limit', 'order' are optional.
-- filter({\"taxonomy\": \"name\", \"author\": \"name\", \"after\": 1234567890, \"before\": 1234567890, \"limit\": 10}) — Filter artifacts by metadata. All fields except 'taxonomy' are optional.
-
-To call a tool, write exactly: <tool>tool_name({\"arg\": \"value\"})</tool>
-For tools with no arguments: <tool>list_taxonomies()</tool>
-When you have gathered enough information, write: <done/>
-
-Strategy:
-1. Start by listing taxonomies if you are unsure which to query.
-2. Use search for semantic/topic queries, browse for chronological queries, and filter for metadata queries.
-3. Gather only what you need, then write <done/>.";
 
 /// Runs the agent query pipeline: gathering phase (tool-use loop),
 /// then synthesis phase (streaming).
@@ -86,17 +55,26 @@ pub(crate) async fn run(
         return;
     }
 
+    // Sanitize user input: strip sentinel tokens to prevent prompt injection.
+    let sanitized_query = query
+        .replace("<done/>", "")
+        .replace("<curtana:done/>", "")
+        .replace("<tool>", "")
+        .replace("</tool>", "");
+
     let conv_context = format_conversation_context(&models.conversation_history);
     let opening_prompt = if conv_context.is_empty() {
-        format!("The user asked: \"{query}\". Use tools to gather information, then write <done/>.")
+        format!(
+            "The user asked: \"{sanitized_query}\". Use tools to gather information, then write <curtana:done/>."
+        )
     } else {
         format!(
             "You have already answered a previous question from this user. \
              Here is the full prior conversation, including the source artifacts you used:\n\n\
              {conv_context}\n\
-             The user now asks: \"{query}\"\n\n\
+             The user now asks: \"{sanitized_query}\"\n\n\
              IMPORTANT: Review the prior conversation and sources above carefully. \
-             If the answer is already contained in those sources, write <done/> immediately \
+             If the answer is already contained in those sources, write <curtana:done/> immediately \
              without calling any tools. Only use tools if you need information that is NOT \
              already present above."
         )
@@ -202,7 +180,13 @@ pub(crate) async fn run(
     if gathered_sources.is_empty() && gathered_context.is_empty() {
         // Pure fallback: model never produced anything useful.
         let router = Router::new(manifest, data_dir.to_path_buf());
-        let results = router.search(&mut models.embed, query, 15).await;
+        let results = match router.search(&mut models.embed, query, 15).await {
+            Ok(r) => r,
+            Err(e) => {
+                tx.send(Event::Error(format!("search failed: {e}"))).ok();
+                return;
+            }
+        };
 
         if results.is_empty() {
             tx.send(Event::Error("no results found.".into())).ok();
@@ -214,7 +198,13 @@ pub(crate) async fn run(
         // Model answered directly or context was gathered but no ScoredArtifacts.
         // Do a Router::search for source attribution.
         let router = Router::new(manifest, data_dir.to_path_buf());
-        let results = router.search(&mut models.embed, query, 15).await;
+        let results = match router.search(&mut models.embed, query, 15).await {
+            Ok(r) => r,
+            Err(e) => {
+                tx.send(Event::Error(format!("search failed: {e}"))).ok();
+                return;
+            }
+        };
 
         // Use gathered context + search results.
         let mut block = String::new();
@@ -241,14 +231,14 @@ pub(crate) async fn run(
 
     let synthesis_prompt = if conv_context.is_empty() {
         format!(
-            "Based on the following sources, answer this query: \"{query}\"\n\n\
+            "Based on the following sources, answer this query: \"{sanitized_query}\"\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
     } else {
         format!(
             "{conv_context}\
-             Based on the following sources, answer the follow-up query: \"{query}\"\n\n\
+             Based on the following sources, answer the follow-up query: \"{sanitized_query}\"\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
