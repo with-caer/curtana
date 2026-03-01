@@ -74,11 +74,21 @@ impl Store {
                 [],
             );
 
-            // Migration: add embedding column for DB-level similarity search.
-            let _ = connection.execute(
-                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS embedding BLOB",
-                [],
-            );
+            // Normalized embeddings table: one row per chunk.
+            connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS artifact_embeddings (
+                        artifact_id VARCHAR NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        embedding FLOAT[] NOT NULL,
+                        PRIMARY KEY (artifact_id, chunk_index)
+                    );",
+                    [],
+                )
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+            // Drop legacy embedding BLOB column if it exists.
+            let _ = connection.execute("ALTER TABLE artifacts DROP COLUMN IF EXISTS embedding", []);
 
             Ok(())
         })
@@ -100,18 +110,41 @@ impl Store {
             .write_data(artifact)
             .map_err(|e| Error::SerializationError(format!("{e:?}")))?;
 
-        // Serialize embedding chunks as a flat blob: [n_chunks: u32][dim: u32][f32 data...]
-        let embedding_blob = serialize_embedding(&artifact.embedding);
+        // Pre-build embedding INSERT literals outside the blocking closure.
+        let embedding_literals: Vec<String> = artifact
+            .embedding
+            .iter()
+            .map(|chunk| embedding_to_sql_literal(chunk))
+            .collect();
+        let id_for_embeddings = id.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let connection = this.connection.blocking_lock();
 
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author, embedding) VALUES (?, ?, ?, ?, ?)",
-                    params![id.as_str(), data_bytes, timestamp, author.as_str(), embedding_blob],
+                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author) VALUES (?, ?, ?, ?)",
+                    params![id.as_str(), data_bytes, timestamp, author.as_str()],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+            // Replace embedding rows for this artifact.
+            connection
+                .execute(
+                    "DELETE FROM artifact_embeddings WHERE artifact_id = ?",
+                    params![id_for_embeddings.as_str()],
+                )
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+            for (chunk_index, literal) in embedding_literals.iter().enumerate() {
+                let sql = format!(
+                    "INSERT INTO artifact_embeddings (artifact_id, chunk_index, embedding) VALUES (?, ?, {})",
+                    literal
+                );
+                connection
+                    .execute(&sql, params![id_for_embeddings.as_str(), chunk_index as i32])
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            }
 
             Ok(())
         })
@@ -160,7 +193,8 @@ impl Store {
             let connection = this.connection.blocking_lock();
 
             let mut statement = match connection.prepare(
-                "SELECT id, data FROM artifacts WHERE embedding IS NULL OR LENGTH(embedding) = 0",
+                "SELECT a.id, a.data FROM artifacts a \
+                 WHERE NOT EXISTS (SELECT 1 FROM artifact_embeddings e WHERE e.artifact_id = a.id)",
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -212,37 +246,6 @@ impl Store {
         Ok(())
     }
 
-    /// Returns all artifacts that have embeddings.
-    pub async fn all_embedded(&self) -> Result<Vec<Artifact>, Error> {
-        let this = self.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
-            let connection = this.connection.blocking_lock();
-
-            let mut statement = connection
-                .prepare(
-                    "SELECT data FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0",
-                )
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let rows = statement
-                .query_map([], |row| {
-                    let data: Vec<u8> = row.get(0)?;
-                    Ok(data)
-                })
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-            Ok(rows
-                .into_iter()
-                .filter_map(|r| {
-                    let data = r.ok()?;
-                    data.as_slice().read_data().ok()
-                })
-                .collect())
-        })
-        .await
-        .map_err(|e| Error::SpawnError(e.to_string()))?
-    }
-
     /// Returns a random sample of up to `limit` artifacts from the store.
     pub async fn sample(&self, limit: usize) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
@@ -274,10 +277,9 @@ impl Store {
 
     /// Finds the `top_k` artifacts most similar to `query` in the datastore.
     ///
-    /// Uses a two-phase approach to avoid loading all artifact data into memory:
-    /// 1. Load only (id, embedding_blob) pairs — compact
-    /// 2. Compute similarity in Rust, pick top-k IDs
-    /// 3. Load full artifact data only for the top-k
+    /// Uses a two-phase approach:
+    /// 1. DuckDB-native `list_cosine_similarity` to score and pick top-k IDs
+    /// 2. Load full artifact data only for the top-k
     pub async fn search(
         &self,
         model: &mut TextEmbeddingModel,
@@ -291,38 +293,37 @@ impl Store {
             .pop()
             .ok_or_else(|| Error::EmbeddingError("no embedding returned".into()))?;
 
-        // Phase 1: Load only (id, embedding_blob) — much smaller than full data.
+        // Phase 1: Score embeddings entirely in DuckDB.
         let this = self.clone();
-        let scored_ids: Vec<(String, f32)> = tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
-            let connection = this.connection.blocking_lock();
+        let query_literal = embedding_to_sql_literal(&query_embedding);
+        let scored_ids: Vec<(String, f32)> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
+                let connection = this.connection.blocking_lock();
 
-            let mut statement = connection
-                .prepare("SELECT id, embedding FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0")
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let rows = statement
-                .query_map([], |row| {
-                    let id: String = row.get(0)?;
-                    let emb_blob: Vec<u8> = row.get(1)?;
-                    Ok((id, emb_blob))
-                })
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let sql = format!(
+                    "SELECT e.artifact_id, \
+                        MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
+                 FROM artifact_embeddings e \
+                 GROUP BY e.artifact_id \
+                 HAVING score > 0.0 \
+                 ORDER BY score DESC \
+                 LIMIT ?",
+                );
+                let mut statement = connection
+                    .prepare(&sql)
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let rows = statement
+                    .query_map(params![top_k as i64], |row| {
+                        let id: String = row.get(0)?;
+                        let score: f64 = row.get(1)?;
+                        Ok((id, score as f32))
+                    })
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            let mut scored = Vec::new();
-            for (id, emb_blob) in rows.flatten() {
-                let chunks = deserialize_embedding(&emb_blob);
-                if !chunks.is_empty() {
-                    let score = best_chunk_score(&chunks, &query_embedding);
-                    scored.push((id, score));
-                }
-            }
-
-            // Sort and truncate to top-k.
-            scored.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
-            scored.truncate(top_k);
-            Ok(scored)
-        })
-        .await
-        .map_err(|e| Error::SpawnError(e.to_string()))??;
+                Ok(rows.flatten().collect())
+            })
+            .await
+            .map_err(|e| Error::SpawnError(e.to_string()))??;
 
         if scored_ids.is_empty() {
             return Ok(vec![]);
@@ -378,46 +379,46 @@ impl Store {
         Ok(artifacts)
     }
 
-    /// Returns scored artifacts for MMR re-ranking. Loads only embedding blobs
-    /// from the DB, scores them, returns the top candidates with their embeddings
-    /// still attached (needed for MMR inter-similarity computation).
+    /// Returns scored artifacts for MMR re-ranking. Scores embeddings in DuckDB,
+    /// then loads full artifact data for the top candidates (needed for MMR
+    /// inter-similarity computation via `Artifact.embedding`).
     pub async fn search_candidates(
         &self,
         query_embedding: &[f32],
         candidate_limit: usize,
     ) -> Result<Vec<(String, f32, Artifact)>, Error> {
         let this = self.clone();
-        let query_emb = query_embedding.to_vec();
+        let query_literal = embedding_to_sql_literal(query_embedding);
 
-        // Phase 1: Score all embeddings, keep top candidates.
-        let scored_ids: Vec<(String, f32)> = tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
-            let connection = this.connection.blocking_lock();
+        // Phase 1: Score embeddings entirely in DuckDB.
+        let scored_ids: Vec<(String, f32)> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
+                let connection = this.connection.blocking_lock();
 
-            let mut statement = connection
-                .prepare("SELECT id, embedding FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0")
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-            let rows = statement
-                .query_map([], |row| {
-                    let id: String = row.get(0)?;
-                    let emb_blob: Vec<u8> = row.get(1)?;
-                    Ok((id, emb_blob))
-                })
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let sql = format!(
+                    "SELECT e.artifact_id, \
+                        MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
+                 FROM artifact_embeddings e \
+                 GROUP BY e.artifact_id \
+                 HAVING score > 0.0 \
+                 ORDER BY score DESC \
+                 LIMIT ?",
+                );
+                let mut statement = connection
+                    .prepare(&sql)
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let rows = statement
+                    .query_map(params![candidate_limit as i64], |row| {
+                        let id: String = row.get(0)?;
+                        let score: f64 = row.get(1)?;
+                        Ok((id, score as f32))
+                    })
+                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            let mut scored = Vec::new();
-            for (id, emb_blob) in rows.flatten() {
-                let chunks = deserialize_embedding(&emb_blob);
-                if !chunks.is_empty() {
-                    let score = best_chunk_score(&chunks, &query_emb);
-                    scored.push((id, score));
-                }
-            }
-            scored.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
-            scored.truncate(candidate_limit);
-            Ok(scored)
-        })
-        .await
-        .map_err(|e| Error::SpawnError(e.to_string()))??;
+                Ok(rows.flatten().collect())
+            })
+            .await
+            .map_err(|e| Error::SpawnError(e.to_string()))??;
 
         if scored_ids.is_empty() {
             return Ok(vec![]);
@@ -632,60 +633,22 @@ fn embed_with_chunking(model: &mut TextEmbeddingModel, text: &str, depth: usize)
     }
 }
 
-/// Serializes chunk embeddings to a flat blob format.
-fn serialize_embedding(chunks: &[Vec<f32>]) -> Vec<u8> {
-    if chunks.is_empty() {
-        return vec![];
-    }
-    let n_chunks = chunks.len() as u32;
-    let dim = chunks.first().map(|c| c.len() as u32).unwrap_or(0);
-    let mut blob = Vec::with_capacity(8 + (n_chunks as usize) * (dim as usize) * 4);
-    blob.extend_from_slice(&n_chunks.to_le_bytes());
-    blob.extend_from_slice(&dim.to_le_bytes());
-    for chunk in chunks {
-        for &val in chunk {
-            blob.extend_from_slice(&val.to_le_bytes());
+/// Formats an embedding slice as a DuckDB `FLOAT[]` literal.
+///
+/// Produces `list_value(0.1234567::FLOAT, -0.7654321::FLOAT, ...)`.
+/// Values are model-generated f32s — no injection risk.
+fn embedding_to_sql_literal(embedding: &[f32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(embedding.len() * 16);
+    s.push_str("list_value(");
+    for (i, &v) in embedding.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
         }
+        let _ = write!(s, "{v}::FLOAT");
     }
-    blob
-}
-
-/// Deserializes chunk embeddings from the flat blob format.
-fn deserialize_embedding(blob: &[u8]) -> Vec<Vec<f32>> {
-    if blob.len() < 8 {
-        return vec![];
-    }
-    let n_chunks = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
-    let dim = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
-
-    let Some(expected_len) = n_chunks
-        .checked_mul(dim)
-        .and_then(|x| x.checked_mul(4))
-        .and_then(|x| x.checked_add(8))
-    else {
-        return vec![];
-    };
-    if blob.len() < expected_len {
-        return vec![];
-    }
-
-    let mut chunks = Vec::with_capacity(n_chunks);
-    let mut offset = 8;
-    for _ in 0..n_chunks {
-        let mut vec = Vec::with_capacity(dim);
-        for _ in 0..dim {
-            let bytes = [
-                blob[offset],
-                blob[offset + 1],
-                blob[offset + 2],
-                blob[offset + 3],
-            ];
-            vec.push(f32::from_le_bytes(bytes));
-            offset += 4;
-        }
-        chunks.push(vec);
-    }
-    chunks
+    s.push(')');
+    s
 }
 
 /// Truncates `text` to at most `max_bytes` bytes, breaking on a UTF-8
@@ -714,15 +677,6 @@ fn char_chunks(text: &str, byte_budget: usize) -> Vec<&str> {
         start = end;
     }
     chunks
-}
-
-/// Returns the highest cosine similarity between any chunk embedding
-/// and the query embedding.
-pub fn best_chunk_score(chunk_embeddings: &[Vec<f32>], query: &[f32]) -> f32 {
-    chunk_embeddings
-        .iter()
-        .map(|chunk| curtana_infers::cosine_distance(chunk, query))
-        .fold(f32::NEG_INFINITY, f32::max)
 }
 
 /// Opens a taxonomy-specific store at `{data_dir}/{taxonomy_name}.duckdb`.
@@ -835,6 +789,123 @@ mod tests {
             Err(Error::NotFound),
             store.get("xyz".into(), &mut not_found).await
         );
+    }
+
+    #[test]
+    fn embedding_to_sql_literal_format() {
+        assert_eq!(embedding_to_sql_literal(&[]), "list_value()");
+        assert_eq!(
+            embedding_to_sql_literal(&[1.0, -0.5]),
+            "list_value(1::FLOAT, -0.5::FLOAT)"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_stores_embeddings_and_search_candidates_returns_them() {
+        let store = Store::new(None).await.unwrap();
+
+        // Two artifacts with fake 3-d embeddings. "close" is near the query,
+        // "far" points in a different direction, "none" has no embedding.
+        let close = Artifact {
+            id: "close".into(),
+            timestamp: 1,
+            author: "t".into(),
+            contents: "close".into(),
+            embedding: vec![vec![1.0, 0.0, 0.0]],
+        };
+        let far = Artifact {
+            id: "far".into(),
+            timestamp: 2,
+            author: "t".into(),
+            contents: "far".into(),
+            embedding: vec![vec![0.0, 0.0, 1.0]],
+        };
+        let none = Artifact {
+            id: "none".into(),
+            timestamp: 3,
+            author: "t".into(),
+            contents: "none".into(),
+            embedding: vec![],
+        };
+        store.upsert(&close).await.unwrap();
+        store.upsert(&far).await.unwrap();
+        store.upsert(&none).await.unwrap();
+
+        // Query pointing in the same direction as "close".
+        let query = [1.0_f32, 0.0, 0.0];
+        let results = store.search_candidates(&query, 10).await.unwrap();
+
+        // "close" should rank first (cosine similarity 1.0).
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, "close");
+        assert!((results[0].1 - 1.0).abs() < 1e-5);
+
+        // "far" should also appear (cosine similarity 0.0 is not > 0,
+        // so it may be excluded by the HAVING clause). If present, it
+        // must rank after "close".
+        if results.len() > 1 {
+            assert_eq!(results[1].0, "far");
+            assert!(results[1].1 < results[0].1);
+        }
+
+        // "none" must never appear — it has no embeddings.
+        assert!(results.iter().all(|(id, _, _)| id != "none"));
+    }
+
+    #[tokio::test]
+    async fn multi_chunk_embeddings_use_best_score() {
+        let store = Store::new(None).await.unwrap();
+
+        // Artifact with two chunk embeddings: one irrelevant, one close to query.
+        let artifact = Artifact {
+            id: "multi".into(),
+            timestamp: 1,
+            author: "t".into(),
+            contents: "multi".into(),
+            embedding: vec![
+                vec![0.0, 0.0, 1.0], // chunk 0: orthogonal to query
+                vec![1.0, 0.0, 0.0], // chunk 1: identical to query
+            ],
+        };
+        store.upsert(&artifact).await.unwrap();
+
+        let query = [1.0_f32, 0.0, 0.0];
+        let results = store.search_candidates(&query, 10).await.unwrap();
+
+        // Should appear with the best chunk's score (~1.0), not the worst.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "multi");
+        assert!((results[0].1 - 1.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn upsert_replaces_embeddings() {
+        let store = Store::new(None).await.unwrap();
+
+        // Insert with an embedding pointing in +x.
+        let mut artifact = Artifact {
+            id: "a".into(),
+            timestamp: 1,
+            author: "t".into(),
+            contents: "a".into(),
+            embedding: vec![vec![1.0, 0.0, 0.0]],
+        };
+        store.upsert(&artifact).await.unwrap();
+
+        // Re-upsert with embedding pointing in +y instead.
+        artifact.embedding = vec![vec![0.0, 1.0, 0.0]];
+        store.upsert(&artifact).await.unwrap();
+
+        // Query in +x should no longer match well.
+        let results_x = store.search_candidates(&[1.0, 0.0, 0.0], 10).await.unwrap();
+        // Query in +y should match.
+        let results_y = store.search_candidates(&[0.0, 1.0, 0.0], 10).await.unwrap();
+
+        assert_eq!(results_y.len(), 1);
+        assert!((results_y[0].1 - 1.0).abs() < 1e-5);
+
+        // +x query: cosine similarity is 0.0, filtered out by HAVING > 0.
+        assert!(results_x.is_empty());
     }
 
     #[tokio::test]
