@@ -221,11 +221,7 @@ pub async fn generate_description(
         .iter()
         .map(|artifact| {
             let s = format!("{}", artifact.contents);
-            if s.len() > 500 {
-                s[..500].to_string()
-            } else {
-                s
-            }
+            crate::truncate_text(&s, 500).to_string()
         })
         .collect();
 

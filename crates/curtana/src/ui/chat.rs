@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
 
         match message.role {
-            Role::Assistant => {
+            Role::Assistant | Role::System => {
                 if message.content.is_empty() {
                     // Streaming placeholder cursor.
                     lines.push(Line::from(Span::styled(
@@ -29,26 +29,14 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                     lines.extend(markdown::to_lines(&message.content));
                 }
             }
-            role => {
-                let (prefix, style) = match role {
-                    Role::User => (
-                        "> ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Role::System => (
-                        "* ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                    Role::Assistant => unreachable!(),
-                };
+            Role::User => {
+                let style = Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD);
                 for (i, text_line) in message.content.lines().enumerate() {
-                    let line_prefix = if i == 0 { prefix } else { "  " };
+                    let prefix = if i == 0 { "> " } else { "  " };
                     lines.push(Line::from(vec![
-                        Span::styled(line_prefix, style),
+                        Span::styled(prefix, style),
                         Span::styled(text_line.to_string(), style),
                     ]));
                 }

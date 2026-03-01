@@ -283,6 +283,16 @@ fn embed_with_chunking(model: &mut TextEmbeddingModel, text: &str) -> Vec<Vec<f3
     }
 }
 
+/// Truncates `text` to at most `max_bytes` bytes, breaking on a UTF-8
+/// character boundary. Returns the full string if it already fits.
+pub fn truncate_text(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        text
+    } else {
+        &text[..text.floor_char_boundary(max_bytes)]
+    }
+}
+
 /// Splits `text` into chunks of approximately `byte_budget` bytes,
 /// always breaking on a UTF-8 character boundary.
 fn char_chunks(text: &str, byte_budget: usize) -> Vec<&str> {
@@ -325,6 +335,38 @@ pub enum Error {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn truncate_text_respects_char_boundaries() {
+        // ASCII: no boundary issues.
+        assert_eq!(truncate_text("hello", 3), "hel");
+        assert_eq!(truncate_text("hello", 10), "hello");
+        assert_eq!(truncate_text("hello", 5), "hello");
+
+        // Multi-byte: 'é' is 2 bytes, so cutting at byte 1 must round down.
+        let s = "é";  // 2 bytes
+        assert_eq!(truncate_text(s, 1), "");
+        assert_eq!(truncate_text(s, 2), "é");
+
+        // 3-byte character (em-dash '—' = E2 80 94).
+        let s = "a—b";  // 1 + 3 + 1 = 5 bytes
+        assert_eq!(truncate_text(s, 2), "a");   // can't fit partial '—'
+        assert_eq!(truncate_text(s, 4), "a—");
+        assert_eq!(truncate_text(s, 5), "a—b");
+
+        // 4-byte character (emoji '🦀' = F0 9F A6 80).
+        let s = "hi🦀!";  // 2 + 4 + 1 = 7 bytes
+        assert_eq!(truncate_text(s, 3), "hi");  // can't fit partial emoji
+        assert_eq!(truncate_text(s, 6), "hi🦀");
+        assert_eq!(truncate_text(s, 7), "hi🦀!");
+
+        // Realistic: truncate a string with mixed multi-byte content at a budget
+        // that lands in the middle of a multi-byte sequence.
+        let s = "café résumé";  // each 'é' is 2 bytes
+        let truncated = truncate_text(s, 5);
+        // "caf" = 3 bytes, "é" = 2 bytes → "café" = 5 bytes, fits exactly.
+        assert_eq!(truncated, "caf\u{e9}");
+    }
 
     #[tokio::test]
     async fn smoke() {

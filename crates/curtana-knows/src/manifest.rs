@@ -21,7 +21,9 @@ pub struct TaxonomyEntry {
     /// Source-specific identifier (e.g. IMAP folder name).
     pub source_id: String,
     /// Source host for reconnection context (no password stored).
-    pub source_host: Option<String>,
+    pub source_host: String,
+    /// Source username for reconnection context.
+    pub source_username: String,
     /// Unix timestamp of the last successful ingestion.
     pub last_ingested_at: Option<u64>,
     /// Unix timestamp of the last description generation.
@@ -101,7 +103,8 @@ mod tests {
                 description: "Technical reference material.".to_string(),
                 source_type: "imap".to_string(),
                 source_id: "knowledge".to_string(),
-                source_host: Some("imap.example.com".to_string()),
+                source_host: "imap.example.com".to_string(),
+                source_username: "user@example.com".to_string(),
                 last_ingested_at: Some(1700000000),
                 description_updated_at: Some(1700000000),
             },

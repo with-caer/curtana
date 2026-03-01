@@ -51,7 +51,7 @@ pub(crate) async fn run(
         send_progress(tx, &format!("Ingesting {taxonomy_name}...\n"));
 
         // Fetch artifacts from source.
-        let artifacts = match find_source(config, &entry.source_type) {
+        let artifacts = match find_source(config, &entry.source_type, &entry.source_host, &entry.source_username) {
             Some(source) => fetch_artifacts(source, &entry.source_id).await,
             None => {
                 send_progress(tx, &format!("  No matching source config, skipping.\n"));
@@ -105,12 +105,12 @@ fn send_progress(tx: &mpsc::UnboundedSender<Event>, text: &str) {
     tx.send(Event::Token(text.to_string())).ok();
 }
 
-/// Finds the source config matching a given source type.
-fn find_source<'a>(config: &'a Config, source_type: &str) -> Option<&'a SourceConfig> {
-    config
-        .source
-        .iter()
-        .find(|s| matches!((source_type, s), ("imap", SourceConfig::Imap(_))))
+/// Finds the source config matching a given source type, host, and username.
+fn find_source<'a>(config: &'a Config, source_type: &str, source_host: &str, source_username: &str) -> Option<&'a SourceConfig> {
+    config.source.iter().find(|s| match (source_type, s) {
+        ("imap", SourceConfig::Imap(c)) => c.host == source_host && c.username == source_username,
+        _ => false,
+    })
 }
 
 /// Fetches artifacts from a source folder.

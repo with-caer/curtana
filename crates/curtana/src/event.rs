@@ -36,6 +36,8 @@ pub enum CommandResult {
 pub struct DiscoverFolder {
     pub index: usize,
     pub name: String,
+    pub source_host: String,
+    pub source_username: String,
     pub already_tracked: bool,
 }
 

@@ -123,11 +123,7 @@ pub async fn query(config: &Config, query: &str) {
     let mut sources_block = String::new();
     for (i, result) in results.iter().enumerate() {
         let text = format!("{}", result.artifact.contents);
-        let content = if text.len() > 2000 {
-            &text[..text.floor_char_boundary(2000)]
-        } else {
-            &text
-        };
+        let content = curtana_knows::truncate_text(&text, 2000);
         let entry = format!(
             "[Source {}] (taxonomy: {}, author: {})\n{}\n\n",
             i + 1,

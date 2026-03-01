@@ -15,6 +15,7 @@ pub(crate) struct DiscoverState {
 pub(crate) struct DiscoverStateEntry {
     pub folder_name: String,
     pub source_host: String,
+    pub source_username: String,
 }
 
 /// Phase 1: connect to sources, discover folders, send listing to UI.
@@ -50,17 +51,23 @@ pub(crate) async fn run(
                     let already_tracked = manifest
                         .taxonomies
                         .values()
-                        .any(|t| t.source_type == "imap" && t.source_id == folder.name);
+                        .any(|t| t.source_type == "imap"
+                            && t.source_id == folder.name
+                            && t.source_host == imap_config.host
+                            && t.source_username == imap_config.username);
 
                     let index = entries.len() + 1;
                     folders.push(DiscoverFolder {
                         index,
                         name: folder.name.clone(),
+                        source_host: imap_config.host.clone(),
+                        source_username: imap_config.username.clone(),
                         already_tracked,
                     });
                     entries.push(DiscoverStateEntry {
                         folder_name: folder.name,
                         source_host: imap_config.host.clone(),
+                        source_username: imap_config.username.clone(),
                     });
                 }
             }
@@ -126,7 +133,7 @@ pub(crate) fn select(
 
     for i in indices {
         let entry = &state.entries[i];
-        let taxonomy_name = format!("imap-{}", sanitize_name(&entry.folder_name));
+        let taxonomy_name = format!("imap-{}-{}", sanitize_source_label(&entry.source_username, &entry.source_host), sanitize_name(&entry.folder_name));
 
         if manifest.taxonomies.contains_key(&taxonomy_name) {
             skipped.push(taxonomy_name);
@@ -140,7 +147,8 @@ pub(crate) fn select(
                 description: String::new(),
                 source_type: "imap".to_string(),
                 source_id: entry.folder_name.clone(),
-                source_host: Some(entry.source_host.clone()),
+                source_host: entry.source_host.clone(),
+                source_username: entry.source_username.clone(),
                 last_ingested_at: None,
                 description_updated_at: None,
             },
@@ -175,4 +183,21 @@ fn sanitize_name(name: &str) -> String {
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
         .trim_matches('-')
         .to_string()
+}
+
+/// Builds a sanitized source label from username and host.
+///
+/// - `john` + `mail.example.com` → `john-mail-example-com`
+/// - `me@caer.cc` + `127.0.0.1` → `me-caer-cc-via-127-0-0-1`
+/// - `me@gmail.com` + `gmail.com` → `me-gmail-com`
+fn sanitize_source_label(username: &str, host: &str) -> String {
+    if let Some(domain) = username.rsplit_once('@').map(|(_, d)| d) {
+        if domain == host {
+            sanitize_name(username)
+        } else {
+            format!("{}-via-{}", sanitize_name(username), sanitize_name(host))
+        }
+    } else {
+        format!("{}-{}", sanitize_name(username), sanitize_name(host))
+    }
 }
