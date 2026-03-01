@@ -34,6 +34,3 @@ clap = { version = "4", features = ["derive"] }
 # Markdown rendering.
 markdown = "1.0.0-alpha.21"
 
-# Logging.
-tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

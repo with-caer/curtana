@@ -165,6 +165,7 @@ async fn fetch_artifacts(
                 password: base_config.password.clone(),
                 mailbox: Some(folder_name.to_string()),
                 sequence: base_config.sequence.clone(),
+                starttls: base_config.starttls,
                 accept_invalid_certs: base_config.accept_invalid_certs,
             };
 

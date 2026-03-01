@@ -19,7 +19,7 @@ const MAX_TOOL_RESULT_CHARS: usize = 3000;
 pub enum ParseResult {
     /// Found `<tool>name({...})</tool>`.
     ToolCall(ToolCall),
-    /// Found `<done/>`.
+    /// Found `<curtana:done/>`.
     Done,
     /// No markers found — treat as direct answer.
     Answer(String),
@@ -39,16 +39,14 @@ pub struct ToolResult {
     pub sources: Vec<ScoredArtifact>,
 }
 
-/// Parses model output for `<tool>name({...})</tool>` or `<done/>` markers.
+/// Parses model output for `<tool>name({...})</tool>` or `<curtana:done/>` markers.
+///
+/// Tool calls are checked first so that `<curtana:done/>` appearing inside
+/// tool arguments does not abort the loop.
 pub fn parse_tool_response(output: &str) -> ParseResult {
     let trimmed = output.trim();
 
-    // Check for <curtana:done/> (preferred) or legacy <done/>.
-    if trimmed.contains("<curtana:done/>") || trimmed.contains("<done/>") {
-        return ParseResult::Done;
-    }
-
-    // Check for <tool>...</tool>.
+    // Check for <tool>...</tool> first — tool args may contain <curtana:done/>.
     if let Some(start) = trimmed.find("<tool>") {
         let after_tag = start + "<tool>".len();
         if let Some(end) = trimmed[after_tag..].find("</tool>") {
@@ -58,6 +56,11 @@ pub fn parse_tool_response(output: &str) -> ParseResult {
                 Err(e) => ParseResult::Answer(format!("Tool parse error: {e}")),
             };
         }
+    }
+
+    // Check for <curtana:done/>.
+    if trimmed.contains("<curtana:done/>") {
+        return ParseResult::Done;
     }
 
     // No markers — treat as direct answer.
@@ -406,7 +409,7 @@ mod tests {
 
     #[test]
     fn parse_done() {
-        let output = "I have enough information. <done/>";
+        let output = "I have enough information. <curtana:done/>";
         assert!(matches!(parse_tool_response(output), ParseResult::Done));
     }
 
@@ -441,6 +444,42 @@ mod tests {
                 assert_eq!(call.args["taxonomy"], "inbox");
             }
             other => panic!("expected ToolCall, got {:?}", result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_done_inside_tool_args() {
+        // <curtana:done/> inside tool args should be parsed as a ToolCall, not Done.
+        let output = r#"<tool>search({"query": "is it <curtana:done/>?"})</tool>"#;
+        match parse_tool_response(output) {
+            ParseResult::ToolCall(call) => {
+                assert_eq!(call.name, "search");
+                assert_eq!(call.args["query"], "is it <curtana:done/>?");
+            }
+            other => panic!("expected ToolCall, got {:?}", result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_legacy_done_not_recognized() {
+        // Legacy <done/> should no longer be recognized as Done.
+        let output = "I'm done. <done/>";
+        match parse_tool_response(output) {
+            ParseResult::Answer(text) => {
+                assert!(text.contains("<done/>"));
+            }
+            other => panic!("expected Answer, got {:?}", result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_empty_tool() {
+        let output = "<tool></tool>";
+        match parse_tool_response(output) {
+            ParseResult::Answer(text) => {
+                assert!(text.contains("Tool parse error"));
+            }
+            other => panic!("expected Answer with error, got {:?}", result_name(&other)),
         }
     }
 

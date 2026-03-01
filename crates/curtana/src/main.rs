@@ -1,5 +1,4 @@
 mod app;
-mod cli;
 mod commands;
 mod config;
 mod event;
@@ -10,7 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,7 +18,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use app::App;
-use commands::CommandRequest;
 use config::Config;
 use event::EventStream;
 
@@ -29,22 +27,6 @@ struct Cli {
     /// Path to the config file.
     #[arg(short, long, default_value = "Curtana.toml")]
     config: PathBuf,
-
-    #[command(subcommand)]
-    command: Option<SubCmd>,
-}
-
-#[derive(Subcommand)]
-enum SubCmd {
-    /// Launch TUI and auto-start source discovery.
-    Discover,
-    /// Run the ingest pipeline headlessly.
-    Ingest,
-    /// Query your knowledge base headlessly.
-    Query {
-        /// The query string.
-        query: String,
-    },
 }
 
 #[tokio::main]
@@ -58,24 +40,10 @@ async fn main() -> io::Result<()> {
         }
     };
 
-    match cli.command {
-        None => run_tui(config, None).await,
-        Some(SubCmd::Discover) => run_tui(config, Some(CommandRequest::Discover)).await,
-        Some(SubCmd::Ingest) => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .init();
-            cli::ingest(&config).await;
-            Ok(())
-        }
-        Some(SubCmd::Query { query }) => {
-            cli::query(&config, &query).await;
-            Ok(())
-        }
-    }
+    run_tui(config).await
 }
 
-async fn run_tui(config: Arc<Config>, auto_command: Option<CommandRequest>) -> io::Result<()> {
+async fn run_tui(config: Arc<Config>) -> io::Result<()> {
     // Install a panic hook that restores the terminal before printing
     // the panic message, so it is readable.
     let original_hook = std::panic::take_hook();
@@ -98,11 +66,6 @@ async fn run_tui(config: Arc<Config>, auto_command: Option<CommandRequest>) -> i
 
     // Create the app.
     let mut app = App::new();
-
-    // If an auto-command was requested, submit it immediately.
-    if let Some(cmd) = auto_command {
-        handler::submit_auto_command(&mut app, cmd, &cmd_tx);
-    }
 
     // Main loop.
     while app.running {

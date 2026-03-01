@@ -136,35 +136,6 @@ fn handle_key(
     }
 }
 
-/// Submits a command on startup without requiring user input text.
-pub fn submit_auto_command(
-    app: &mut App,
-    cmd: CommandRequest,
-    cmd_tx: &mpsc::UnboundedSender<CommandRequest>,
-) {
-    match &cmd {
-        CommandRequest::Discover => {
-            app.add_message(Message::user("/discover".into()));
-            app.status = AppStatus::Loading("Discovering...".into());
-        }
-        CommandRequest::Ingest => {
-            app.add_message(Message::user("/ingest".into()));
-            app.status = AppStatus::Loading("Ingesting...".into());
-        }
-        CommandRequest::Query(q) => {
-            app.add_message(Message::user(q.clone()));
-            app.add_message(Message::assistant(String::new()));
-            app.status = AppStatus::Loading("Querying...".into());
-        }
-        CommandRequest::Status => {
-            app.add_message(Message::user("/status".into()));
-            app.status = AppStatus::Loading("Loading status...".into());
-        }
-        CommandRequest::DiscoverSelect(_) => return,
-    }
-    cmd_tx.send(cmd).ok();
-}
-
 fn submit(app: &mut App, input: &str, cmd_tx: &mpsc::UnboundedSender<CommandRequest>) {
     let command = commands::parse(input);
 

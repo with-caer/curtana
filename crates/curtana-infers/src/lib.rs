@@ -105,6 +105,19 @@ pub struct ChatModel {
     messages: Vec<LlamaChatMessage>,
 }
 
+/// RAII guard that pops the last message from the chat history on drop.
+/// Used by `infer()` to ensure the user prompt is always removed, even
+/// if an intermediate operation returns early via `?`.
+struct MessageGuard<'a> {
+    messages: &'a mut Vec<LlamaChatMessage>,
+}
+
+impl Drop for MessageGuard<'_> {
+    fn drop(&mut self) {
+        self.messages.pop();
+    }
+}
+
 impl ChatModel {
     /// Run inference against the model with `prompt`,
     /// adding the prompt and the model's output to
@@ -180,11 +193,16 @@ impl ChatModel {
             prompt.to_string(),
         )?);
 
-        // Format and tokenize the prompt.
+        // Format and tokenize the prompt (borrows model, chat_template, messages immutably).
         let prompt = self
             .model
             .apply_chat_template(&self.chat_template, &self.messages, true)?;
         let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
+
+        // Guard ensures the pushed message is always popped, even on early `?` returns.
+        let _guard = MessageGuard {
+            messages: &mut self.messages,
+        };
 
         // Prepare inference context.
         let context_params = LlamaContextParams::default()
@@ -241,7 +259,6 @@ impl ChatModel {
 
             // is it an end of stream?
             if self.model.is_eog_token(token) {
-                eprintln!();
                 break;
             }
 
@@ -259,9 +276,7 @@ impl ChatModel {
             context.decode(&mut batch)?;
         }
 
-        // Remove the prompt from the inference history.
-        let _ = self.messages.pop();
-
+        // Guard drops here, popping the message.
         Ok(())
     }
 }

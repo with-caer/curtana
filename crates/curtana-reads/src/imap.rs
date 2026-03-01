@@ -88,36 +88,52 @@ impl Drop for SessionGuard {
     }
 }
 
-/// Establishes an authenticated IMAP session over STARTTLS.
+/// Establishes an authenticated IMAP session.
+///
+/// By default, uses implicit TLS (connect over TLS immediately, typically
+/// port 993). When `config.starttls` is `true`, uses the STARTTLS upgrade
+/// flow (typically port 143).
 async fn imap_session(config: &ImapConfig) -> Result<SessionGuard, ImapError> {
-    // Establish a TCP connection.
-    let tcp_stream = TcpStream::connect((config.host.clone(), config.port))
-        .await
-        .map_err(|e| ImapError::ConnectionFailed(e.to_string()))?;
-
-    // Establish an IMAP connection.
-    let mut client = async_imap::Client::new(tcp_stream);
-    let _greeting = client.read_response().await.ok_or_else(|| {
-        ImapError::ConnectionFailed("unexpected end of stream, expected greeting".into())
-    })?;
-
-    // Upgrade to a TLS connection.
-    client
-        .run_command_and_check_ok("STARTTLS", None)
-        .await
-        .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
-    let stream = client.into_inner();
     let mut tls = TlsConnector::new();
     if config.accept_invalid_certs {
         tls = tls
             .danger_accept_invalid_hostnames(true)
             .danger_accept_invalid_certs(true);
     }
-    let tls_stream = tls
-        .connect(config.host.clone(), stream)
+
+    // Establish a TCP connection.
+    let tcp_stream = TcpStream::connect((config.host.clone(), config.port))
         .await
-        .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
-    let client = async_imap::Client::new(tls_stream);
+        .map_err(|e| ImapError::ConnectionFailed(e.to_string()))?;
+
+    let client = if config.starttls {
+        // STARTTLS: plaintext greeting, then upgrade to TLS.
+        let mut client = async_imap::Client::new(tcp_stream);
+        let _greeting = client.read_response().await.ok_or_else(|| {
+            ImapError::ConnectionFailed("unexpected end of stream, expected greeting".into())
+        })?;
+        client
+            .run_command_and_check_ok("STARTTLS", None)
+            .await
+            .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
+        let stream = client.into_inner();
+        let tls_stream = tls
+            .connect(config.host.clone(), stream)
+            .await
+            .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
+        async_imap::Client::new(tls_stream)
+    } else {
+        // Implicit TLS: wrap in TLS immediately, then read greeting.
+        let tls_stream = tls
+            .connect(config.host.clone(), tcp_stream)
+            .await
+            .map_err(|e| ImapError::TlsFailed(e.to_string()))?;
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client.read_response().await.ok_or_else(|| {
+            ImapError::ConnectionFailed("unexpected end of stream, expected greeting".into())
+        })?;
+        client
+    };
 
     // Authenticate with the IMAP server.
     let session = client
@@ -294,7 +310,7 @@ impl ToMarkdown for EmailMessage {
 pub struct ImapConfig {
     /// IMAP server hostname.
     pub host: String,
-    /// IMAP server port (typically 143 for STARTTLS).
+    /// IMAP server port (typically 993 for implicit TLS, 143 for STARTTLS).
     pub port: u16,
     /// Login username.
     pub username: String,
@@ -306,6 +322,10 @@ pub struct ImapConfig {
     /// IMAP sequence set to fetch, e.g. `"1:*"`, `"1:50"`.
     /// Defaults to `"1:*"` when `None`.
     pub sequence: Option<String>,
+    /// Use STARTTLS upgrade instead of implicit TLS.
+    /// Defaults to `false` (implicit TLS on port 993).
+    #[serde(default)]
+    pub starttls: bool,
     /// Accept invalid TLS certificates and hostnames.
     /// **Only** enable for local/dev IMAP servers.
     /// Defaults to `false`.

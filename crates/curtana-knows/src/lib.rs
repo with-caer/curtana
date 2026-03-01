@@ -159,7 +159,9 @@ impl Store {
         let unembedded: Vec<(String, Artifact)> = tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
 
-            let mut statement = match connection.prepare("SELECT id, data FROM artifacts") {
+            let mut statement = match connection.prepare(
+                "SELECT id, data FROM artifacts WHERE embedding IS NULL OR LENGTH(embedding) = 0",
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     warn!("failed to prepare embed_pending query: {e}");
@@ -185,11 +187,7 @@ impl Store {
                         Ok(a) => a,
                         Err(_) => return None,
                     };
-                    if artifact.embedding.is_empty() {
-                        Some((id, artifact))
-                    } else {
-                        None
-                    }
+                    Some((id, artifact))
                 })
                 .collect::<Vec<_>>()
         })
@@ -222,7 +220,9 @@ impl Store {
             let connection = this.connection.blocking_lock();
 
             let mut statement = connection
-                .prepare("SELECT data FROM artifacts")
+                .prepare(
+                    "SELECT data FROM artifacts WHERE embedding IS NOT NULL AND LENGTH(embedding) > 0",
+                )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
                 .query_map([], |row| {
@@ -235,12 +235,7 @@ impl Store {
                 .into_iter()
                 .filter_map(|r| {
                     let data = r.ok()?;
-                    let artifact: Artifact = data.as_slice().read_data().ok()?;
-                    if artifact.embedding.is_empty() {
-                        None
-                    } else {
-                        Some(artifact)
-                    }
+                    data.as_slice().read_data().ok()
                 })
                 .collect())
         })
@@ -663,7 +658,13 @@ fn deserialize_embedding(blob: &[u8]) -> Vec<Vec<f32>> {
     let n_chunks = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
     let dim = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
 
-    let expected_len = 8 + n_chunks * dim * 4;
+    let Some(expected_len) = n_chunks
+        .checked_mul(dim)
+        .and_then(|x| x.checked_mul(4))
+        .and_then(|x| x.checked_add(8))
+    else {
+        return vec![];
+    };
     if blob.len() < expected_len {
         return vec![];
     }
@@ -725,7 +726,19 @@ pub fn best_chunk_score(chunk_embeddings: &[Vec<f32>], query: &[f32]) -> f32 {
 }
 
 /// Opens a taxonomy-specific store at `{data_dir}/{taxonomy_name}.duckdb`.
+///
+/// `taxonomy_name` must be non-empty and consist only of alphanumeric
+/// characters, hyphens, or underscores to prevent path traversal.
 pub async fn open_taxonomy_store(data_dir: &Path, taxonomy_name: &str) -> Result<Store, Error> {
+    if taxonomy_name.is_empty()
+        || !taxonomy_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(Error::DatabaseError(format!(
+            "invalid taxonomy name: {taxonomy_name:?}"
+        )));
+    }
     let path = data_dir.join(format!("{taxonomy_name}.duckdb"));
     let path_str = path
         .to_str()

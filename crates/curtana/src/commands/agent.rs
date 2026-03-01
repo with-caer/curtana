@@ -55,24 +55,17 @@ pub(crate) async fn run(
         return;
     }
 
-    // Sanitize user input: strip sentinel tokens to prevent prompt injection.
-    let sanitized_query = query
-        .replace("<done/>", "")
-        .replace("<curtana:done/>", "")
-        .replace("<tool>", "")
-        .replace("</tool>", "");
-
     let conv_context = format_conversation_context(&models.conversation_history);
     let opening_prompt = if conv_context.is_empty() {
         format!(
-            "The user asked: \"{sanitized_query}\". Use tools to gather information, then write <curtana:done/>."
+            "The user asked:\n<user-query>{query}</user-query>\n\nUse tools to gather information, then write <curtana:done/>."
         )
     } else {
         format!(
             "You have already answered a previous question from this user. \
              Here is the full prior conversation, including the source artifacts you used:\n\n\
              {conv_context}\n\
-             The user now asks: \"{sanitized_query}\"\n\n\
+             The user now asks:\n<user-query>{query}</user-query>\n\n\
              IMPORTANT: Review the prior conversation and sources above carefully. \
              If the answer is already contained in those sources, write <curtana:done/> immediately \
              without calling any tools. Only use tools if you need information that is NOT \
@@ -231,14 +224,16 @@ pub(crate) async fn run(
 
     let synthesis_prompt = if conv_context.is_empty() {
         format!(
-            "Based on the following sources, answer this query: \"{sanitized_query}\"\n\n\
+            "Based on the following sources, answer this query:\n\
+             <user-query>{query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
     } else {
         format!(
             "{conv_context}\
-             Based on the following sources, answer the follow-up query: \"{sanitized_query}\"\n\n\
+             Based on the following sources, answer the follow-up query:\n\
+             <user-query>{query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
@@ -287,7 +282,7 @@ fn summarize_tool_call(call: &tools::ToolCall) -> String {
     }
     if let Some(v) = args.get("query").and_then(|v| v.as_str()) {
         if v.len() > 40 {
-            parts.push(format!("{}...", &v[..37]));
+            parts.push(format!("{}...", curtana_knows::truncate_text(v, 37)));
         } else {
             parts.push(v.to_string());
         }
@@ -313,7 +308,10 @@ fn summarize_result(text: &str) -> String {
     } else if text.len() <= 60 {
         text.replace('\n', " ")
     } else {
-        format!("{}...", &text[..57].replace('\n', " "))
+        format!(
+            "{}...",
+            curtana_knows::truncate_text(text, 57).replace('\n', " ")
+        )
     }
 }
 
@@ -321,15 +319,12 @@ fn summarize_result(text: &str) -> String {
 /// the character budget.
 fn build_sources_block(results: &[ScoredArtifact]) -> String {
     let mut block = String::new();
-    for (i, result) in results.iter().enumerate() {
+    for result in results {
         let text = format!("{}", result.artifact.contents);
         let content = curtana_knows::truncate_text(&text, 2000);
         let entry = format!(
-            "[Source {}] (taxonomy: {}, author: {})\n{}\n\n",
-            i + 1,
-            result.taxonomy,
-            result.artifact.author,
-            content,
+            "<source taxonomy=\"{}\" author=\"{}\">\n{}\n</source>\n\n",
+            result.taxonomy, result.artifact.author, content,
         );
         if block.len() + entry.len() > MAX_SOURCES_CHARS {
             break;

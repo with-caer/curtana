@@ -59,15 +59,12 @@ pub(crate) async fn run(
 
     // Build context block from retrieved candidates.
     let mut sources_block = String::new();
-    for (i, result) in results.iter().enumerate() {
+    for result in &results {
         let text = format!("{}", result.artifact.contents);
         let content = curtana_knows::truncate_text(&text, 2000);
         let entry = format!(
-            "[Source {}] (taxonomy: {}, author: {})\n{}\n\n",
-            i + 1,
-            result.taxonomy,
-            result.artifact.author,
-            content,
+            "<source taxonomy=\"{}\" author=\"{}\">\n{}\n</source>\n\n",
+            result.taxonomy, result.artifact.author, content,
         );
         if sources_block.len() + entry.len() > MAX_SOURCES_CHARS {
             break;
@@ -78,14 +75,16 @@ pub(crate) async fn run(
     let conv_context = format_conversation_context(&models.conversation_history);
     let synthesis_prompt = if conv_context.is_empty() {
         format!(
-            "Based on the following sources, answer this query: \"{query}\"\n\n\
+            "Based on the following sources, answer this query:\n\
+             <user-query>{query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
     } else {
         format!(
             "{conv_context}\
-             Based on the following sources, answer the follow-up query: \"{query}\"\n\n\
+             Based on the following sources, answer the follow-up query:\n\
+             <user-query>{query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )

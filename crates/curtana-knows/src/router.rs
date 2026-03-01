@@ -274,7 +274,7 @@ pub async fn generate_description(
     let samples_block = sample_texts
         .iter()
         .enumerate()
-        .map(|(i, text)| format!("--- Sample {} ---\n{text}", i + 1))
+        .map(|(i, text)| format!("<sample index=\"{}\">\n{text}\n</sample>", i + 1))
         .collect::<Vec<_>>()
         .join("\n\n");
 
