@@ -1,6 +1,7 @@
 mod chat;
 mod detail;
 mod input;
+mod markdown;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};

@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
+use super::markdown;
 use crate::app::{App, Role};
 
 /// Renders the scrollable chat message history.
@@ -16,37 +17,42 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(""));
         }
 
-        let (prefix, style) = match message.role {
-            Role::User => (
-                "> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Role::Assistant => ("", Style::default()),
-            Role::System => (
-                "* ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        };
-
-        // Split content into lines and apply styling.
-        for (i, text_line) in message.content.lines().enumerate() {
-            let line_prefix = if i == 0 { prefix } else { "  " };
-            lines.push(Line::from(vec![
-                Span::styled(line_prefix, style),
-                Span::styled(text_line.to_string(), style),
-            ]));
-        }
-
-        // Handle empty content (e.g., streaming placeholder).
-        if message.content.is_empty() && message.role == Role::Assistant {
-            lines.push(Line::from(Span::styled(
-                "\u{2588}",
-                Style::default().fg(Color::DarkGray),
-            )));
+        match message.role {
+            Role::Assistant => {
+                if message.content.is_empty() {
+                    // Streaming placeholder cursor.
+                    lines.push(Line::from(Span::styled(
+                        "\u{2588}",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    lines.extend(markdown::to_lines(&message.content));
+                }
+            }
+            role => {
+                let (prefix, style) = match role {
+                    Role::User => (
+                        "> ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Role::System => (
+                        "* ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                    Role::Assistant => unreachable!(),
+                };
+                for (i, text_line) in message.content.lines().enumerate() {
+                    let line_prefix = if i == 0 { prefix } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::styled(line_prefix, style),
+                        Span::styled(text_line.to_string(), style),
+                    ]));
+                }
+            }
         }
     }
 
