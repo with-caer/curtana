@@ -20,6 +20,10 @@ This concierge breaks the trifecta by eliminating the ability to take action. It
 2. An external gateway that can receive action proposals from the agent, presenting them for human review.
 3. An execution service that can execute approved actions, but has no agentic functionality.
 
+#### Read-Only Boundary
+
+The agent is strictly read-only with respect to external systems. It reads from sources like IMAP (using `LIST` and `FETCH`) but never modifies them (no `STORE`, `EXPUNGE`, or `APPEND` commands). Local writes — taxonomy databases, the manifest file, embeddings — are internal state management and do not constitute "actions" in the Lethal Trifecta sense.
+
 ### Normalizes Artifacts to Markdown
 
 The read-only agent normalizes all artifacts (e.g., emails and PDFs) to Markdown text, which can then be content-aware chunked for embedding into a local vector index.
@@ -56,7 +60,7 @@ A future enhancement could enable hybrid assignment, where the agent uses LLM in
 
 #### Query Routing
 
-When the agent receives a query, it uses the local LLM to classify the query's intent against the taxonomy descriptions from the manifest. The agent's context includes the name and description of each taxonomy, giving it enough information to route the query to the most relevant collection(s). A query may be routed to multiple taxonomies when it spans categories, with results merged and reranked.
+When the agent receives a query, it routes to the most relevant taxonomies by comparing the query's embedding against each taxonomy description's embedding using cosine similarity. The top taxonomies are selected for search, with results merged and reranked using Maximal Marginal Relevance (MMR) to balance relevance with diversity across sources. When taxonomy count is small enough, all taxonomies are searched directly.
 
 For example:
 

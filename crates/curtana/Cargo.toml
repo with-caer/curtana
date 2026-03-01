@@ -1,0 +1,32 @@
+[package]
+name = "curtana"
+description = "Your AI concierge."
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "curtana"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates.
+curtana-reads = { workspace = true }
+curtana-knows = { workspace = true }
+curtana-infers = { workspace = true }
+
+# CLI.
+clap = { version = "4", features = ["derive"] }
+
+# Config.
+toml = "0.8.22"
+serde = { workspace = true }
+
+# Async runtime.
+tokio = { workspace = true }
+
+# Logging.
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

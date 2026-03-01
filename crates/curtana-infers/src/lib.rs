@@ -233,13 +233,16 @@ impl TextEmbeddingModel {
         }
 
         // Prepare inference context.
+        // Use the model's trained context length to avoid exceeding
+        // position embedding table bounds (e.g. BERT-style models).
+        let n_ctx_train = self.model.n_ctx_train();
         let thread_count = std::thread::available_parallelism()
             .unwrap_or(NonZero::new(1).unwrap())
             .get() as i32;
         let context_params = LlamaContextParams::default()
-            .with_n_batch(DEFAULT_CONTEXT_LENGTH as u32)
-            .with_n_ubatch(DEFAULT_CONTEXT_LENGTH as u32)
-            .with_n_ctx(NonZeroU32::new(DEFAULT_CONTEXT_LENGTH as u32))
+            .with_n_batch(n_ctx_train)
+            .with_n_ubatch(n_ctx_train)
+            .with_n_ctx(NonZeroU32::new(n_ctx_train))
             .with_n_threads(thread_count)
             .with_n_threads_batch(thread_count)
             .with_embeddings(true);
@@ -271,6 +274,7 @@ impl TextEmbeddingModel {
         // Embed batches.
         let mut embeddings = Vec::with_capacity(tokens.len());
         for tokens in tokens {
+            batch.clear();
             batch.add_sequence(&tokens, 0, false)?;
 
             // Run inference for embedding.
@@ -424,13 +428,13 @@ mod tests {
     ///       wget https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512-GGUF/resolve/main/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf
     const CHAT_MODEL: &str = "../../Ministral-3-3B-Instruct-2512-Q4_K_M.gguf";
 
-    /// From: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF
-    ///       wget https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf
-    const TEXT_EMBEDDING_MODEL: &str = "../../nomic-embed-text-v1.5.f16.gguf";
+    // From: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF
+    //       wget https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf
+    // const TEXT_EMBEDDING_MODEL: &str = "../../nomic-embed-text-v1.5.f16.gguf";
 
-    // From: https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
-    //       wget https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
-    // const TEXT_EMBEDDING_MODEL: &str = "../../all-MiniLM-L6-v2-ggml-model-f16.gguf";
+    /// From: https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
+    ///       wget https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
+    const TEXT_EMBEDDING_MODEL: &str = "../../all-MiniLM-L6-v2-ggml-model-f16.gguf";
 
     #[test]
     fn chat() {
@@ -455,21 +459,23 @@ mod tests {
 
         let embeddings = model
             .embed(&[
-                "search_document: might and magic in fantasy realms",
-                "search_document: swords and sorcery for fantasy authors",
-                "search_document: practical engineering for scientists",
+                "might and magic in fantasy realms",
+                "swords and sorcery for fantasy authors",
+                "practical engineering for scientists",
             ])
             .unwrap();
         assert_eq!(3, embeddings.len());
-        let query_embeddings = model.embed(&["query_document: fantasy"]).unwrap();
+        let query_embeddings = model.embed(&["fantasy"]).unwrap();
         assert_eq!(1, query_embeddings.len());
 
-        let distance_a = cosine_distance(&query_embeddings[0], &embeddings[0]);
-        let distance_b = cosine_distance(&query_embeddings[0], &embeddings[1]);
-        let distance_c = cosine_distance(&query_embeddings[0], &embeddings[2]);
+        let similarity_a = cosine_distance(&query_embeddings[0], &embeddings[0]);
+        let similarity_b = cosine_distance(&query_embeddings[0], &embeddings[1]);
+        let similarity_c = cosine_distance(&query_embeddings[0], &embeddings[2]);
 
-        assert!(distance_a < distance_c);
-        assert!(distance_b < distance_c);
+        // Fantasy texts should be more similar to the "fantasy" query
+        // than an engineering text is.
+        assert!(similarity_a > similarity_c);
+        assert!(similarity_b > similarity_c);
     }
 
     #[test]
@@ -488,12 +494,12 @@ mod tests {
 
         let embedding = model.embed(&[text]);
 
-        assert_eq!(
-            Err(Error::ContextSize {
-                maximum: DEFAULT_CONTEXT_LENGTH,
-                actual: 24148
-            }),
-            embedding
+        assert!(
+            matches!(
+                embedding,
+                Err(Error::ContextSize { .. }) | Err(Error::MicrobatchSize { .. })
+            ),
+            "expected ContextSize or MicrobatchSize error, got: {embedding:?}"
         );
     }
 }

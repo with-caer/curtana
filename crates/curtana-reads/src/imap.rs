@@ -20,7 +20,19 @@ pub struct EmailMessage {
     pub body: String,
 }
 
-pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
+pub struct ImapFolder {
+    /// Folder name as returned by the server.
+    pub name: String,
+    /// Hierarchy delimiter (e.g. `"/"` or `"."`).
+    pub delimiter: Option<String>,
+    /// Whether this folder can be selected (i.e. contains messages).
+    pub is_selectable: bool,
+}
+
+/// Establishes an authenticated IMAP session over STARTTLS.
+async fn imap_session(
+    config: &ImapConfig,
+) -> async_imap::Session<async_native_tls::TlsStream<TcpStream>> {
     // Establish a TCP connection.
     let tcp_stream = TcpStream::connect((config.host.clone(), config.port))
         .await
@@ -46,17 +58,54 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
     let client = async_imap::Client::new(tls_stream);
 
     // Authenticate with the IMAP server.
-    let mut session = client
+    client
         .login(config.username.clone(), config.password.clone())
         .await
-        .unwrap();
+        .unwrap()
+}
 
-    // Request access to the inbox.
-    session.select(&config.mailbox).await.unwrap();
+/// Lists all folders on the IMAP server. Read-only — does not select
+/// any mailbox or fetch any messages.
+pub async fn discover_folders(config: &ImapConfig) -> Vec<ImapFolder> {
+    let mut session = imap_session(config).await;
+
+    let names = session.list(None, Some("*")).await.unwrap();
+    let folders: Vec<_> = names
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|name| {
+            let is_selectable = !name
+                .attributes()
+                .iter()
+                .any(|attr| matches!(attr, async_imap::types::NameAttribute::NoSelect));
+
+            ImapFolder {
+                name: name.name().to_owned(),
+                delimiter: name.delimiter().map(|d| d.to_string()),
+                is_selectable,
+            }
+        })
+        .collect();
+
+    session.logout().await.unwrap();
+
+    folders
+}
+
+pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
+    let mut session = imap_session(config).await;
+
+    let mailbox = config.mailbox.as_deref().unwrap_or("INBOX");
+    let sequence = config.sequence.as_deref().unwrap_or("1:*");
+
+    // Request access to the mailbox.
+    session.select(mailbox).await.unwrap();
 
     // Fetch messages in this mailbox, along with their RFC822 field.
     // RFC 822 dictates the format of the body of e-mails
-    let messages_stream = session.fetch(&config.sequence, "RFC822").await.unwrap();
+    let messages_stream = session.fetch(sequence, "RFC822").await.unwrap();
     let messages: Vec<_> = messages_stream.try_collect().await.unwrap();
 
     // Parse messages.
@@ -97,7 +146,11 @@ pub async fn fetch_emails(config: &ImapConfig) -> Vec<EmailMessage> {
                         html.push_str(&part);
                     }
                 }
-                htmd::convert(&html).unwrap_or(html)
+                htmd::HtmlToMarkdown::builder()
+                    .skip_tags(vec!["style", "script"])
+                    .build()
+                    .convert(&html)
+                    .unwrap_or(html)
             } else {
                 let mut text = String::new();
                 for i in 0..m.text_body_count() {
@@ -151,7 +204,9 @@ pub struct ImapConfig {
     /// Login password.
     pub password: String,
     /// Mailbox to select, e.g. `"INBOX"`, `"[Gmail]/All Mail"`.
-    pub mailbox: String,
+    /// Defaults to `"INBOX"` when `None`.
+    pub mailbox: Option<String>,
     /// IMAP sequence set to fetch, e.g. `"1:*"`, `"1:50"`.
-    pub sequence: String,
+    /// Defaults to `"1:*"` when `None`.
+    pub sequence: Option<String>,
 }

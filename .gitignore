@@ -1,3 +1,5 @@
 /target
 *.gguf
 .DS_Store
+Curtana.toml
+.curtana

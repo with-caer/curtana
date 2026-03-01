@@ -16,10 +16,11 @@ Data structures for knowledge graph storage and retrieval.
 
     The name of the person or entity that authored the artifact.
 
-+ `contents` unspecified
++ `contents` text
 
-    The raw contents of the artifact.
+    The raw contents of the artifact, normalized to Markdown.
 
-+ `embedding` optional list of f32
++ `embedding` 2d list of f32
 
-    A vector embedding over the contents of the artifact.
+    Vector embeddings over the contents of the artifact. Each entry
+    corresponds to one chunk of the artifact's text.

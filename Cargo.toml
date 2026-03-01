@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/curtana",
     "crates/curtana-infers",
     "crates/curtana-reads",
     "crates/curtana-knows",
@@ -22,6 +23,7 @@ curtana-reads = { path = "crates/curtana-reads" }
 curtana-knows = { path = "crates/curtana-knows" }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
+tracing = "0.1"
 
 [profile.dev]
 # Use release optimizations during testing to
