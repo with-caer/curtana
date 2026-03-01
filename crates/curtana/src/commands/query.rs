@@ -64,7 +64,9 @@ pub(crate) async fn run(
         let content = curtana_knows::truncate_text(&text, 2000);
         let entry = format!(
             "<source taxonomy=\"{}\" author=\"{}\">\n{}\n</source>\n\n",
-            result.taxonomy, result.artifact.author, content,
+            curtana_knows::escape_xml(&result.taxonomy),
+            curtana_knows::escape_xml(&format!("{}", result.artifact.author)),
+            curtana_knows::escape_xml(content),
         );
         if sources_block.len() + entry.len() > MAX_SOURCES_CHARS {
             break;
@@ -73,10 +75,11 @@ pub(crate) async fn run(
     }
 
     let conv_context = format_conversation_context(&models.conversation_history);
+    let escaped_query = curtana_knows::escape_xml(query);
     let synthesis_prompt = if conv_context.is_empty() {
         format!(
             "Based on the following sources, answer this query:\n\
-             <user-query>{query}</user-query>\n\n\
+             <user-query>{escaped_query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
@@ -84,7 +87,7 @@ pub(crate) async fn run(
         format!(
             "{conv_context}\
              Based on the following sources, answer the follow-up query:\n\
-             <user-query>{query}</user-query>\n\n\
+             <user-query>{escaped_query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )

@@ -372,8 +372,11 @@ fn format_single_artifact(index: usize, artifact: &Artifact, taxonomy: &str) -> 
     let content = format!("{}", artifact.contents);
     let content = truncate_text(&content, 500);
     format!(
-        "[{index}] Author: {} | Date: {} | Taxonomy: {taxonomy}\n{content}",
-        artifact.author, artifact.timestamp,
+        "[{index}] Author: {} | Date: {} | Taxonomy: {}\n{}",
+        crate::escape_xml(&format!("{}", artifact.author)),
+        artifact.timestamp,
+        crate::escape_xml(taxonomy),
+        crate::escape_xml(content),
     )
 }
 
@@ -480,6 +483,37 @@ mod tests {
                 assert!(text.contains("Tool parse error"));
             }
             other => panic!("expected Answer with error, got {:?}", result_name(&other)),
+        }
+    }
+
+    #[test]
+    fn parse_nested_tool_tags() {
+        // Nested </tool> inside args causes the parser to find the first
+        // </tool> and truncate the JSON, resulting in a parse error.
+        // This is expected behavior — the model should not emit </tool>
+        // inside tool arguments.
+        let output = r#"<tool>search({"query": "find <tool>inner</tool> stuff"})</tool>"#;
+        match parse_tool_response(output) {
+            ParseResult::Answer(text) => {
+                assert!(text.contains("Tool parse error"));
+            }
+            other => panic!(
+                "expected Answer with parse error, got {:?}",
+                result_name(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn parse_done_in_non_query_field() {
+        // <curtana:done/> in a browse tool call should be parsed as ToolCall.
+        let output = r#"<tool>browse({"taxonomy": "curtana:done"})</tool>"#;
+        match parse_tool_response(output) {
+            ParseResult::ToolCall(call) => {
+                assert_eq!(call.name, "browse");
+                assert_eq!(call.args["taxonomy"], "curtana:done");
+            }
+            other => panic!("expected ToolCall, got {:?}", result_name(&other)),
         }
     }
 

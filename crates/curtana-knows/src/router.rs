@@ -187,7 +187,7 @@ fn mmr_select(
         .enumerate()
         .max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score))
         .map(|(i, _)| i)
-        .unwrap();
+        .expect("candidates verified non-empty above");
     selected_taxonomies.insert(candidates[best_idx].taxonomy.clone());
     selected.push(candidates.swap_remove(best_idx));
 
@@ -274,7 +274,13 @@ pub async fn generate_description(
     let samples_block = sample_texts
         .iter()
         .enumerate()
-        .map(|(i, text)| format!("<sample index=\"{}\">\n{text}\n</sample>", i + 1))
+        .map(|(i, text)| {
+            format!(
+                "<sample index=\"{}\">\n{}\n</sample>",
+                i + 1,
+                crate::escape_xml(text)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
 

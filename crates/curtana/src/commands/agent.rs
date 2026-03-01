@@ -56,16 +56,17 @@ pub(crate) async fn run(
     }
 
     let conv_context = format_conversation_context(&models.conversation_history);
+    let escaped_query = curtana_knows::escape_xml(query);
     let opening_prompt = if conv_context.is_empty() {
         format!(
-            "The user asked:\n<user-query>{query}</user-query>\n\nUse tools to gather information, then write <curtana:done/>."
+            "The user asked:\n<user-query>{escaped_query}</user-query>\n\nUse tools to gather information, then write <curtana:done/>."
         )
     } else {
         format!(
             "You have already answered a previous question from this user. \
              Here is the full prior conversation, including the source artifacts you used:\n\n\
              {conv_context}\n\
-             The user now asks:\n<user-query>{query}</user-query>\n\n\
+             The user now asks:\n<user-query>{escaped_query}</user-query>\n\n\
              IMPORTANT: Review the prior conversation and sources above carefully. \
              If the answer is already contained in those sources, write <curtana:done/> immediately \
              without calling any tools. Only use tools if you need information that is NOT \
@@ -225,7 +226,7 @@ pub(crate) async fn run(
     let synthesis_prompt = if conv_context.is_empty() {
         format!(
             "Based on the following sources, answer this query:\n\
-             <user-query>{query}</user-query>\n\n\
+             <user-query>{escaped_query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
@@ -233,7 +234,7 @@ pub(crate) async fn run(
         format!(
             "{conv_context}\
              Based on the following sources, answer the follow-up query:\n\
-             <user-query>{query}</user-query>\n\n\
+             <user-query>{escaped_query}</user-query>\n\n\
              {sources_block}\
              Synthesize a clear, concise answer. Cite the sources you draw from."
         )
@@ -324,7 +325,9 @@ fn build_sources_block(results: &[ScoredArtifact]) -> String {
         let content = curtana_knows::truncate_text(&text, 2000);
         let entry = format!(
             "<source taxonomy=\"{}\" author=\"{}\">\n{}\n</source>\n\n",
-            result.taxonomy, result.artifact.author, content,
+            curtana_knows::escape_xml(&result.taxonomy),
+            curtana_knows::escape_xml(&format!("{}", result.artifact.author)),
+            curtana_knows::escape_xml(content),
         );
         if block.len() + entry.len() > MAX_SOURCES_CHARS {
             break;
@@ -332,4 +335,51 @@ fn build_sources_block(results: &[ScoredArtifact]) -> String {
         block.push_str(&entry);
     }
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curtana_knows::Artifact;
+
+    fn test_artifact(author: &str, taxonomy: &str, content: &str) -> ScoredArtifact {
+        ScoredArtifact {
+            taxonomy: taxonomy.to_string(),
+            score: 1.0,
+            artifact: Artifact {
+                id: "test".into(),
+                timestamp: 0,
+                author: author.into(),
+                contents: content.into(),
+                embedding: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn build_sources_block_escapes_content() {
+        let results = vec![test_artifact("alice", "inbox", "<script>alert(1)</script>")];
+        let block = build_sources_block(&results);
+        assert!(!block.contains("<script>"));
+        assert!(block.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn build_sources_block_escapes_author_and_taxonomy() {
+        let results = vec![test_artifact("O'Brien & Co", "tax\"name", "safe content")];
+        let block = build_sources_block(&results);
+        assert!(block.contains("O&apos;Brien &amp; Co"));
+        assert!(block.contains("tax&quot;name"));
+    }
+
+    #[test]
+    fn build_sources_block_budget_enforcement() {
+        // Create enough artifacts to exceed the budget.
+        let big_content = "x".repeat(3000);
+        let results: Vec<ScoredArtifact> = (0..20)
+            .map(|i| test_artifact("a", &format!("t{i}"), &big_content))
+            .collect();
+        let block = build_sources_block(&results);
+        assert!(block.len() <= MAX_SOURCES_CHARS + 500); // entry overhead
+    }
 }

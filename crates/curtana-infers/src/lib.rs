@@ -217,16 +217,18 @@ impl ChatModel {
             maximum: i32::MAX as usize,
             actual: DEFAULT_CONTEXT_LENGTH,
         })?;
-        let n_cxt = context.n_ctx() as i32;
+        let n_cxt = i32::try_from(context.n_ctx()).map_err(|_| Error::ContextSize {
+            maximum: i32::MAX as usize,
+            actual: context.n_ctx() as usize,
+        })?;
         let tokens_len_i32 = i32::try_from(tokens.len()).map_err(|_| Error::ContextSize {
             maximum: i32::MAX as usize,
             actual: tokens.len(),
         })?;
-        let n_kv_req = tokens_len_i32 + (n_len - tokens_len_i32);
-        if n_kv_req > n_cxt {
+        if tokens_len_i32 > n_cxt {
             return Err(Error::ContextSize {
                 maximum: n_cxt as usize,
-                actual: n_kv_req as usize,
+                actual: tokens_len_i32 as usize,
             });
         }
 
@@ -234,6 +236,12 @@ impl ChatModel {
         let mut batch = LlamaBatch::new(DEFAULT_BATCH_SIZE, 1);
 
         // Submit initial batch for inference.
+        if tokens.is_empty() {
+            return Err(Error::ContextSize {
+                maximum: n_cxt as usize,
+                actual: 0,
+            });
+        }
         let last_index = tokens.len() - 1;
         for (i, token) in tokens.into_iter().enumerate() {
             let pos = i32::try_from(i).map_err(|_| Error::ContextSize {
@@ -300,9 +308,12 @@ impl TextEmbeddingModel {
         // Use the model's trained context length to avoid exceeding
         // position embedding table bounds (e.g. BERT-style models).
         let n_ctx_train = self.model.n_ctx_train();
-        let thread_count = std::thread::available_parallelism()
-            .unwrap_or(NonZero::new(1).unwrap())
-            .get() as i32;
+        let thread_count = i32::try_from(
+            std::thread::available_parallelism()
+                .unwrap_or(NonZero::new(1).unwrap())
+                .get(),
+        )
+        .unwrap_or(1);
         let context_params = LlamaContextParams::default()
             .with_n_batch(n_ctx_train)
             .with_n_ubatch(n_ctx_train)
@@ -353,10 +364,14 @@ impl TextEmbeddingModel {
                 .iter()
                 .fold(0.0, |acc, &val| val.mul_add(val, acc))
                 .sqrt();
-            let embedding: Vec<_> = embedding
-                .iter()
-                .map(|&val| val / embedding_magnitude)
-                .collect();
+            let embedding: Vec<_> = if embedding_magnitude < f32::EPSILON {
+                vec![0.0; embedding.len()]
+            } else {
+                embedding
+                    .iter()
+                    .map(|&val| val / embedding_magnitude)
+                    .collect()
+            };
 
             embeddings.push(embedding);
         }
@@ -365,17 +380,18 @@ impl TextEmbeddingModel {
     }
 }
 
-/// Returns the cosine distance between two vectors.
+/// Returns the cosine similarity between two vectors.
+///
+/// Returns `0.0` for empty, mismatched-length, or zero-magnitude vectors.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
     let mut dot = 0.;
     let mut dot_a = 0.;
     let mut dot_b = 0.;
 
-    // Iterate over all points `a` and `b` in
-    // the embeddings, creating three sums:
-    // - The sum of all `a * b`
-    // - The sum of all `a * a`
-    // - The sum of all `b * b`
     for i in 0..a.len() {
         dot += a[i] * b[i];
         dot_a += a[i] * a[i];
@@ -387,10 +403,6 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
 
-    // Calculate the cosine similarity,
-    // which is the sum of all `a * b`,
-    // over the square root of the product
-    // of the sums of `a * a` and `b * b`.
     dot / (dot_a * dot_b).sqrt()
 }
 
@@ -504,6 +516,60 @@ mod tests {
     /// From: https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
     ///       wget https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-ggml-model-f16.gguf
     const TEXT_EMBEDDING_MODEL: &str = "../../all-MiniLM-L6-v2-ggml-model-f16.gguf";
+
+    #[test]
+    fn cosine_distance_equal_vectors() {
+        let v = [1.0, 2.0, 3.0];
+        let sim = cosine_distance(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_distance_orthogonal_vectors() {
+        let a = [1.0, 0.0, 0.0];
+        let b = [0.0, 1.0, 0.0];
+        let sim = cosine_distance(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_distance_opposite_vectors() {
+        let a = [1.0, 0.0];
+        let b = [-1.0, 0.0];
+        let sim = cosine_distance(&a, &b);
+        assert!((sim - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_distance_mismatched_lengths() {
+        let a = [1.0, 2.0];
+        let b = [1.0, 2.0, 3.0];
+        assert_eq!(cosine_distance(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_distance_zero_vectors() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 2.0, 3.0];
+        assert_eq!(cosine_distance(&a, &b), 0.0);
+        assert_eq!(cosine_distance(&b, &a), 0.0);
+        assert_eq!(cosine_distance(&a, &a), 0.0);
+    }
+
+    #[test]
+    fn cosine_distance_empty_vectors() {
+        let empty: [f32; 0] = [];
+        assert_eq!(cosine_distance(&empty, &empty), 0.0);
+    }
+
+    #[test]
+    fn cosine_distance_normalized_vectors() {
+        // Already-normalized unit vectors.
+        let a = [1.0, 0.0];
+        let b = [0.7071068, 0.7071068]; // ~45 degrees
+        let sim = cosine_distance(&a, &b);
+        assert!((sim - 0.7071068).abs() < 1e-5);
+    }
 
     #[test]
     fn chat() {

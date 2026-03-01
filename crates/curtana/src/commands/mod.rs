@@ -136,7 +136,7 @@ pub(crate) fn format_conversation_context(history: &[ConversationEntry]) -> Stri
     for entry in history {
         let turn_open = format!(
             "<turn>\n<user-query>{}</user-query>\n<assistant-response>",
-            entry.query
+            curtana_knows::escape_xml(&entry.query),
         );
         let turn_close = "</assistant-response>\n</turn>\n";
         let header_len = turn_open.len() + turn_close.len();
@@ -307,6 +307,54 @@ pub fn spawn_command_thread(
     });
 
     cmd_tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_conversation_context_empty() {
+        assert_eq!(format_conversation_context(&[]), "");
+    }
+
+    #[test]
+    fn format_conversation_context_single_entry() {
+        let entries = vec![ConversationEntry {
+            query: "hello".to_string(),
+            response: "world".to_string(),
+            sources: String::new(),
+        }];
+        let ctx = format_conversation_context(&entries);
+        assert!(ctx.contains("<prior-conversation>"));
+        assert!(ctx.contains("</prior-conversation>"));
+        assert!(ctx.contains("<user-query>hello</user-query>"));
+        assert!(ctx.contains("world"));
+    }
+
+    #[test]
+    fn format_conversation_context_escaping() {
+        let entries = vec![ConversationEntry {
+            query: "find <script>alert(1)</script>".to_string(),
+            response: "safe".to_string(),
+            sources: String::new(),
+        }];
+        let ctx = format_conversation_context(&entries);
+        assert!(!ctx.contains("<script>"));
+        assert!(ctx.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn format_conversation_context_budget_truncation() {
+        let entries = vec![ConversationEntry {
+            query: "q".to_string(),
+            response: "x".repeat(MAX_HISTORY_CHARS + 100),
+            sources: String::new(),
+        }];
+        let ctx = format_conversation_context(&entries);
+        assert!(ctx.len() <= MAX_HISTORY_CHARS + 200); // some overhead for tags
+        assert!(ctx.contains("..."));
+    }
 }
 
 fn load_models(config: &Config) -> Result<Models, String> {
