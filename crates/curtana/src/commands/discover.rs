@@ -1,0 +1,178 @@
+use std::path::Path;
+
+use curtana_knows::manifest::{Manifest, TaxonomyEntry};
+use curtana_reads::imap;
+use tokio::sync::mpsc;
+
+use crate::config::{Config, SourceConfig};
+use crate::event::{CommandResult, DiscoverFolder, Event};
+
+/// State retained between the two discovery phases.
+pub(crate) struct DiscoverState {
+    pub entries: Vec<DiscoverStateEntry>,
+}
+
+pub(crate) struct DiscoverStateEntry {
+    pub folder_name: String,
+    pub source_host: String,
+}
+
+/// Phase 1: connect to sources, discover folders, send listing to UI.
+///
+/// Returns state to hold until the user makes a selection.
+pub(crate) async fn run(
+    config: &Config,
+    tx: &mpsc::UnboundedSender<Event>,
+) -> Option<DiscoverState> {
+    let data_dir = Path::new(config.data_dir());
+    let manifest_path = data_dir.join("manifest.toml");
+
+    let manifest = match Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tx.send(Event::Error(format!("failed to load manifest: {e}")))
+                .ok();
+            return None;
+        }
+    };
+
+    let mut entries = Vec::new();
+    let mut folders = Vec::new();
+
+    for source in &config.source {
+        match source {
+            SourceConfig::Imap(imap_config) => {
+                let discovered = imap::discover_folders(imap_config).await;
+                let selectable: Vec<_> =
+                    discovered.into_iter().filter(|f| f.is_selectable).collect();
+
+                for folder in selectable {
+                    let already_tracked = manifest
+                        .taxonomies
+                        .values()
+                        .any(|t| t.source_type == "imap" && t.source_id == folder.name);
+
+                    let index = entries.len() + 1;
+                    folders.push(DiscoverFolder {
+                        index,
+                        name: folder.name.clone(),
+                        already_tracked,
+                    });
+                    entries.push(DiscoverStateEntry {
+                        folder_name: folder.name,
+                        source_host: imap_config.host.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        tx.send(Event::CommandDone(CommandResult::Message(
+            "No selectable folders found.".into(),
+        )))
+        .ok();
+        return None;
+    }
+
+    tx.send(Event::CommandDone(CommandResult::DiscoverFolders { folders }))
+        .ok();
+
+    Some(DiscoverState { entries })
+}
+
+/// Phase 2: parse the user's selection and update the manifest.
+pub(crate) fn select(
+    config: &Config,
+    input: &str,
+    state: DiscoverState,
+    tx: &mpsc::UnboundedSender<Event>,
+) {
+    let data_dir = Path::new(config.data_dir());
+    let manifest_path = data_dir.join("manifest.toml");
+
+    let mut manifest = match Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tx.send(Event::Error(format!("failed to load manifest: {e}")))
+                .ok();
+            return;
+        }
+    };
+
+    let input = input.trim();
+
+    let indices: Vec<usize> = if input.eq_ignore_ascii_case("all") {
+        (0..state.entries.len()).collect()
+    } else {
+        input
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .map(|n| n.saturating_sub(1))
+            .filter(|&i| i < state.entries.len())
+            .collect()
+    };
+
+    if indices.is_empty() {
+        tx.send(Event::CommandDone(CommandResult::Message(
+            "No valid folders selected.".into(),
+        )))
+        .ok();
+        return;
+    }
+
+    let mut added = Vec::new();
+    let mut skipped = Vec::new();
+
+    for i in indices {
+        let entry = &state.entries[i];
+        let taxonomy_name = format!("imap-{}", sanitize_name(&entry.folder_name));
+
+        if manifest.taxonomies.contains_key(&taxonomy_name) {
+            skipped.push(taxonomy_name);
+            continue;
+        }
+
+        manifest.taxonomies.insert(
+            taxonomy_name.clone(),
+            TaxonomyEntry {
+                name: taxonomy_name.clone(),
+                description: String::new(),
+                source_type: "imap".to_string(),
+                source_id: entry.folder_name.clone(),
+                source_host: Some(entry.source_host.clone()),
+                last_ingested_at: None,
+                description_updated_at: None,
+            },
+        );
+        added.push(taxonomy_name);
+    }
+
+    if let Err(e) = manifest.save(&manifest_path) {
+        tx.send(Event::Error(format!("failed to save manifest: {e}")))
+            .ok();
+        return;
+    }
+
+    let mut msg = String::new();
+    if !added.is_empty() {
+        msg.push_str(&format!("Added {} taxonomies: {}", added.len(), added.join(", ")));
+    }
+    if !skipped.is_empty() {
+        if !msg.is_empty() {
+            msg.push('\n');
+        }
+        msg.push_str(&format!("Skipped {} (already tracked): {}", skipped.len(), skipped.join(", ")));
+    }
+
+    tx.send(Event::CommandDone(CommandResult::Message(msg)))
+        .ok();
+}
+
+/// Converts a folder name into a safe taxonomy name component.
+fn sanitize_name(name: &str) -> String {
+    name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
+        .trim_matches('-')
+        .to_string()
+}

@@ -1,39 +1,42 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use curtana_infers::ModelRegistry;
 use curtana_knows::manifest::Manifest;
 use curtana_knows::{Artifact, open_taxonomy_store, router};
 use curtana_reads::ToMarkdown;
 use curtana_reads::imap;
-
-use tracing::{info, warn};
+use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
+use crate::event::{CommandResult, Event};
 
-/// For each taxonomy in the manifest: fetches artifacts from its source,
-/// upserts into the taxonomy store, embeds pending artifacts, and
-/// generates a description if empty or stale.
-pub async fn run(config: &Config) {
+use super::Models;
+
+/// Runs the full ingest pipeline, sending progress as `Event::Token`.
+pub(crate) async fn run(
+    config: &Config,
+    models: &mut Models,
+    tx: &mpsc::UnboundedSender<Event>,
+) {
     let data_dir = Path::new(config.data_dir());
     let manifest_path = data_dir.join("manifest.toml");
-    let mut manifest = Manifest::load(&manifest_path).unwrap();
+
+    let mut manifest = match Manifest::load(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tx.send(Event::Error(format!("failed to load manifest: {e}")))
+                .ok();
+            return;
+        }
+    };
 
     if manifest.taxonomies.is_empty() {
-        warn!("no taxonomies in manifest — run `curtana discover` first");
+        tx.send(Event::CommandDone(CommandResult::Message(
+            "No taxonomies in manifest \u{2014} run /discover first.".into(),
+        )))
+        .ok();
         return;
     }
-
-    let registry = ModelRegistry::new().unwrap();
-    let mut embed_model = registry
-        .load_text_embedding_model(&config.embed_model)
-        .unwrap();
-    let mut chat_model = registry
-        .load_chat_model(
-            &config.chat_model,
-            "You are a helpful assistant that summarizes collections of documents.",
-        )
-        .unwrap();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -44,18 +47,19 @@ pub async fn run(config: &Config) {
 
     for taxonomy_name in &taxonomy_names {
         let entry = manifest.taxonomies.get(taxonomy_name).unwrap().clone();
-        info!("ingesting taxonomy: {taxonomy_name}");
 
-        // Fetch artifacts from the source.
-        let artifacts = match find_source(config, &entry.source_type, &entry.source_id) {
+        send_progress(tx, &format!("Ingesting {taxonomy_name}...\n"));
+
+        // Fetch artifacts from source.
+        let artifacts = match find_source(config, &entry.source_type) {
             Some(source) => fetch_artifacts(source, &entry.source_id).await,
             None => {
-                warn!("no matching source config found, skipping");
+                send_progress(tx, &format!("  No matching source config, skipping.\n"));
                 continue;
             }
         };
 
-        info!("fetched {} artifacts", artifacts.len());
+        send_progress(tx, &format!("  Fetched {} artifacts.\n", artifacts.len()));
 
         // Upsert into taxonomy store.
         let store = open_taxonomy_store(data_dir, taxonomy_name).await;
@@ -63,8 +67,9 @@ pub async fn run(config: &Config) {
             store.upsert(artifact.id.clone(), artifact).await;
         }
 
-        // Embed pending.
-        store.embed_pending(&mut embed_model).await;
+        // Embed pending artifacts.
+        send_progress(tx, "  Embedding...\n");
+        store.embed_pending(&mut models.embed).await;
 
         // Update ingestion timestamp.
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
@@ -75,34 +80,43 @@ pub async fn run(config: &Config) {
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name)
             && entry.description.is_empty()
         {
-            info!("generating description...");
-            let description = router::generate_description(&store, &mut chat_model, 10).await;
+            send_progress(tx, "  Generating description...\n");
+            let description = router::generate_description(&store, &mut models.chat, 10).await;
             entry.description = description;
             entry.description_updated_at = Some(now);
         }
+
+        send_progress(tx, &format!("  Done.\n"));
     }
 
-    manifest.save(&manifest_path).unwrap();
-    info!("manifest updated at {}", manifest_path.display());
+    if let Err(e) = manifest.save(&manifest_path) {
+        tx.send(Event::Error(format!("failed to save manifest: {e}")))
+            .ok();
+        return;
+    }
+
+    tx.send(Event::CommandDone(CommandResult::Message(
+        "Ingestion complete.".into(),
+    )))
+    .ok();
 }
 
-/// Finds the source config that matches the given source type and folder.
-fn find_source<'a>(
-    config: &'a Config,
-    source_type: &str,
-    _source_id: &str,
-) -> Option<&'a SourceConfig> {
+fn send_progress(tx: &mpsc::UnboundedSender<Event>, text: &str) {
+    tx.send(Event::Token(text.to_string())).ok();
+}
+
+/// Finds the source config matching a given source type.
+fn find_source<'a>(config: &'a Config, source_type: &str) -> Option<&'a SourceConfig> {
     config
         .source
         .iter()
         .find(|s| matches!((source_type, s), ("imap", SourceConfig::Imap(_))))
 }
 
-/// Fetches artifacts from a source and converts them to the Artifact type.
+/// Fetches artifacts from a source folder.
 async fn fetch_artifacts(source: &SourceConfig, folder_name: &str) -> Vec<Artifact> {
     match source {
         SourceConfig::Imap(base_config) => {
-            // Create a config targeting the specific folder.
             let folder_config = imap::ImapConfig {
                 host: base_config.host.clone(),
                 port: base_config.port,

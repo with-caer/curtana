@@ -17,8 +17,9 @@ curtana-reads = { workspace = true }
 curtana-knows = { workspace = true }
 curtana-infers = { workspace = true }
 
-# CLI.
-clap = { version = "4", features = ["derive"] }
+# TUI.
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+crossterm = "0.28"
 
 # Config.
 toml = "0.8.22"
@@ -26,6 +27,9 @@ serde = { workspace = true }
 
 # Async runtime.
 tokio = { workspace = true }
+
+# CLI.
+clap = { version = "4", features = ["derive"] }
 
 # Logging.
 tracing = { workspace = true }
