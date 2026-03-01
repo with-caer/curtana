@@ -98,7 +98,11 @@ impl Store {
     /// that don't already have embeddings. If the text exceeds
     /// the model's context window, it is split into chunks and
     /// each chunk is embedded separately.
-    pub async fn embed_pending(&self, model: &mut TextEmbeddingModel) {
+    pub async fn embed_pending(
+        &self,
+        model: &mut TextEmbeddingModel,
+        mut on_progress: impl FnMut(usize, usize),
+    ) {
         let this = self.clone();
 
         // Find all unembedded artifacts.
@@ -135,12 +139,15 @@ impl Store {
         .await
         .unwrap();
 
-        info!("embedding {} artifacts", unembedded.len());
+        let total = unembedded.len();
+        info!("embedding {} artifacts", total);
+        on_progress(0, total);
 
         for (i, (artifact_id, mut artifact)) in unembedded.into_iter().enumerate() {
             let text = format!("{}", artifact.contents);
             artifact.embedding = embed_with_chunking(model, &text);
             self.upsert(artifact_id.into(), &artifact).await;
+            on_progress(i + 1, total);
 
             if i % 50 == 0 {
                 info!("embedded {i} artifacts...");
@@ -344,25 +351,25 @@ mod tests {
         assert_eq!(truncate_text("hello", 5), "hello");
 
         // Multi-byte: 'é' is 2 bytes, so cutting at byte 1 must round down.
-        let s = "é";  // 2 bytes
+        let s = "é"; // 2 bytes
         assert_eq!(truncate_text(s, 1), "");
         assert_eq!(truncate_text(s, 2), "é");
 
         // 3-byte character (em-dash '—' = E2 80 94).
-        let s = "a—b";  // 1 + 3 + 1 = 5 bytes
-        assert_eq!(truncate_text(s, 2), "a");   // can't fit partial '—'
+        let s = "a—b"; // 1 + 3 + 1 = 5 bytes
+        assert_eq!(truncate_text(s, 2), "a"); // can't fit partial '—'
         assert_eq!(truncate_text(s, 4), "a—");
         assert_eq!(truncate_text(s, 5), "a—b");
 
         // 4-byte character (emoji '🦀' = F0 9F A6 80).
-        let s = "hi🦀!";  // 2 + 4 + 1 = 7 bytes
-        assert_eq!(truncate_text(s, 3), "hi");  // can't fit partial emoji
+        let s = "hi🦀!"; // 2 + 4 + 1 = 7 bytes
+        assert_eq!(truncate_text(s, 3), "hi"); // can't fit partial emoji
         assert_eq!(truncate_text(s, 6), "hi🦀");
         assert_eq!(truncate_text(s, 7), "hi🦀!");
 
         // Realistic: truncate a string with mixed multi-byte content at a budget
         // that lands in the middle of a multi-byte sequence.
-        let s = "café résumé";  // each 'é' is 2 bytes
+        let s = "café résumé"; // each 'é' is 2 bytes
         let truncated = truncate_text(s, 5);
         // "caf" = 3 bytes, "é" = 2 bytes → "café" = 5 bytes, fits exactly.
         assert_eq!(truncated, "caf\u{e9}");

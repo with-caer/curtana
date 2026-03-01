@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use ratatui::Frame;
 
 use crate::app::App;
 
@@ -60,7 +60,14 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 let line = Line::from(vec![
                     Span::styled(format!("{:<12}", cmd.name), style),
-                    Span::styled(cmd.description, style.fg(if i == cs.selected { Color::Black } else { Color::DarkGray })),
+                    Span::styled(
+                        cmd.description,
+                        style.fg(if i == cs.selected {
+                            Color::Black
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
                 ]);
                 ListItem::new(line)
             })

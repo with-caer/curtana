@@ -1,15 +1,19 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{ActivePane, App, DetailView};
 
 /// Renders the right-side detail panel.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.active_pane == ActivePane::Detail;
-    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -65,7 +69,10 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                         format!("[{}] ", source.index),
                         Style::default().fg(Color::Yellow),
                     ),
-                    Span::raw(format!("{:.4} | {} | {}", source.score, source.taxonomy, source.title)),
+                    Span::raw(format!(
+                        "{:.4} | {} | {}",
+                        source.score, source.taxonomy, source.title
+                    )),
                 ]));
             }
             lines
@@ -81,7 +88,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let inner_width = area.width.saturating_sub(2);
     let inner_height = area.height.saturating_sub(2) as usize;
 
-    let paragraph = Paragraph::new(content).block(block).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(content)
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     let line_count = paragraph.line_count(inner_width);
     let max_scroll = line_count.saturating_sub(inner_height);

@@ -1,5 +1,5 @@
-use crate::commands::{CommandInfo, COMMANDS};
-use crate::event::SourceRef;
+use crate::commands::{COMMANDS, CommandInfo};
+use crate::event::{Progress, SourceRef};
 use curtana_knows::manifest::TaxonomyEntry;
 
 /// Which pane currently has focus for scrolling.
@@ -37,6 +37,10 @@ pub struct App {
     pub status: AppStatus,
     /// Active command completion popup.
     pub completion: Option<CompletionState>,
+    /// Current spinner animation frame.
+    pub spinner_frame: usize,
+    /// Progress for a long-running operation (shown in header).
+    pub progress: Option<Progress>,
 }
 
 pub enum AppStatus {
@@ -101,6 +105,8 @@ impl App {
             running: true,
             status: AppStatus::Idle,
             completion: None,
+            spinner_frame: 0,
+            progress: None,
         }
     }
 
@@ -149,11 +155,11 @@ impl App {
 
     /// Accept the currently selected completion, replacing input with the command name.
     pub fn accept_completion(&mut self) {
-        if let Some(cs) = self.completion.take() {
-            if let Some(cmd) = cs.matches.get(cs.selected) {
-                self.input = cmd.name.to_string();
-                self.cursor_position = self.input.len();
-            }
+        if let Some(cs) = self.completion.take()
+            && let Some(cmd) = cs.matches.get(cs.selected)
+        {
+            self.input = cmd.name.to_string();
+            self.cursor_position = self.input.len();
         }
     }
 

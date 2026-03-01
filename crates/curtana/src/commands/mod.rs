@@ -20,11 +20,26 @@ pub struct CommandInfo {
 
 /// All slash commands, sorted alphabetically for the completion popup.
 pub const COMMANDS: &[CommandInfo] = &[
-    CommandInfo { name: "/discover", description: "Discover source folders" },
-    CommandInfo { name: "/help",     description: "Show help" },
-    CommandInfo { name: "/ingest",   description: "Ingest artifacts" },
-    CommandInfo { name: "/quit",     description: "Exit curtana" },
-    CommandInfo { name: "/status",   description: "Show tracked taxonomies" },
+    CommandInfo {
+        name: "/discover",
+        description: "Discover source folders",
+    },
+    CommandInfo {
+        name: "/help",
+        description: "Show help",
+    },
+    CommandInfo {
+        name: "/ingest",
+        description: "Ingest artifacts",
+    },
+    CommandInfo {
+        name: "/quit",
+        description: "Exit curtana",
+    },
+    CommandInfo {
+        name: "/status",
+        description: "Show tracked taxonomies",
+    },
 ];
 
 /// Parsed user command.
@@ -116,9 +131,7 @@ pub fn spawn_command_thread(
                             discover::select(&config, &input, state, &event_tx);
                         } else {
                             event_tx
-                                .send(Event::Error(
-                                    "No pending discovery session.".into(),
-                                ))
+                                .send(Event::Error("No pending discovery session.".into()))
                                 .ok();
                         }
                     }

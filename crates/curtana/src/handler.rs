@@ -24,11 +24,7 @@ const HELP_TEXT: &str = "\
 - `Ctrl+C` \u{2014} Exit";
 
 /// Processes an event and mutates application state.
-pub fn handle_event(
-    app: &mut App,
-    event: Event,
-    cmd_tx: &mpsc::UnboundedSender<CommandRequest>,
-) {
+pub fn handle_event(app: &mut App, event: Event, cmd_tx: &mpsc::UnboundedSender<CommandRequest>) {
     match event {
         Event::Terminal(CrosstermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
             handle_key(app, key.code, key.modifiers, cmd_tx);
@@ -42,6 +38,20 @@ pub fn handle_event(
         Event::Error(err) => {
             app.add_message(Message::system(format!("Error: {err}")));
             app.status = AppStatus::Idle;
+            app.progress = None;
+        }
+        Event::Tick => {
+            if matches!(app.status, AppStatus::Loading(_)) {
+                app.spinner_frame = app.spinner_frame.wrapping_add(1);
+            }
+        }
+        Event::Progress(progress) => {
+            app.progress = Some(progress);
+        }
+        Event::StatusText(msg) => {
+            if matches!(app.status, AppStatus::Loading(_)) {
+                app.status = AppStatus::Loading(msg);
+            }
         }
         _ => {}
     }
@@ -132,7 +142,6 @@ pub fn submit_auto_command(
         }
         CommandRequest::Ingest => {
             app.add_message(Message::user("/ingest".into()));
-            app.add_message(Message::system(String::new()));
             app.status = AppStatus::Loading("Ingesting...".into());
         }
         CommandRequest::Query(q) => {
@@ -171,7 +180,6 @@ fn submit(app: &mut App, input: &str, cmd_tx: &mpsc::UnboundedSender<CommandRequ
         }
         Command::Ingest => {
             app.add_message(Message::user(input.to_string()));
-            app.add_message(Message::system(String::new()));
             app.status = AppStatus::Loading("Ingesting...".into());
             cmd_tx.send(CommandRequest::Ingest).ok();
         }
@@ -186,6 +194,7 @@ fn submit(app: &mut App, input: &str, cmd_tx: &mpsc::UnboundedSender<CommandRequ
 }
 
 fn handle_command_done(app: &mut App, result: CommandResult) {
+    app.progress = None;
     match result {
         CommandResult::Query { sources } => {
             app.status = AppStatus::Idle;
@@ -223,7 +232,11 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
             for (label, group_folders) in &groups {
                 text.push_str(&format!("### {label}\n\n"));
                 for f in group_folders {
-                    let marker = if f.already_tracked { " *(already tracked)*" } else { "" };
+                    let marker = if f.already_tracked {
+                        " *(already tracked)*"
+                    } else {
+                        ""
+                    };
                     text.push_str(&format!("- `[{}]` {}{}\n", f.index, f.name, marker));
                 }
                 text.push('\n');

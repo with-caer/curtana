@@ -28,10 +28,7 @@ pub fn run(config: &Config, tx: &mpsc::UnboundedSender<Event>) {
         return;
     }
 
-    let entries: Vec<(String, _)> = manifest
-        .taxonomies
-        .into_iter()
-        .collect();
+    let entries: Vec<(String, _)> = manifest.taxonomies.into_iter().collect();
 
     tx.send(Event::CommandDone(CommandResult::Status { entries }))
         .ok();

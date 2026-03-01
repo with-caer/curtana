@@ -8,16 +8,12 @@ use curtana_reads::imap;
 use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
-use crate::event::{CommandResult, Event};
+use crate::event::{CommandResult, Event, Progress};
 
 use super::Models;
 
-/// Runs the full ingest pipeline, sending progress as `Event::Token`.
-pub(crate) async fn run(
-    config: &Config,
-    models: &mut Models,
-    tx: &mpsc::UnboundedSender<Event>,
-) {
+/// Runs the full ingest pipeline, updating header status and progress bar.
+pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::UnboundedSender<Event>) {
     let data_dir = Path::new(config.data_dir());
     let manifest_path = data_dir.join("manifest.toml");
 
@@ -44,22 +40,28 @@ pub(crate) async fn run(
         .as_secs();
 
     let taxonomy_names: Vec<String> = manifest.taxonomies.keys().cloned().collect();
+    let mut summary_lines: Vec<String> = Vec::new();
 
     for taxonomy_name in &taxonomy_names {
         let entry = manifest.taxonomies.get(taxonomy_name).unwrap().clone();
 
-        send_progress(tx, &format!("Ingesting {taxonomy_name}...\n"));
+        set_status(tx, &format!("Fetching {taxonomy_name}..."));
 
         // Fetch artifacts from source.
-        let artifacts = match find_source(config, &entry.source_type, &entry.source_host, &entry.source_username) {
+        let artifacts = match find_source(
+            config,
+            &entry.source_type,
+            &entry.source_host,
+            &entry.source_username,
+        ) {
             Some(source) => fetch_artifacts(source, &entry.source_id).await,
             None => {
-                send_progress(tx, &format!("  No matching source config, skipping.\n"));
+                summary_lines.push(format!("- **{taxonomy_name}**: skipped (no source config)"));
                 continue;
             }
         };
 
-        send_progress(tx, &format!("  Fetched {} artifacts.\n", artifacts.len()));
+        let count = artifacts.len();
 
         // Upsert into taxonomy store.
         let store = open_taxonomy_store(data_dir, taxonomy_name).await;
@@ -68,8 +70,17 @@ pub(crate) async fn run(
         }
 
         // Embed pending artifacts.
-        send_progress(tx, "  Embedding...\n");
-        store.embed_pending(&mut models.embed).await;
+        let embed_label = format!("Embedding {taxonomy_name}");
+        store
+            .embed_pending(&mut models.embed, |current, total| {
+                tx.send(Event::Progress(Progress {
+                    current,
+                    total,
+                    label: embed_label.clone(),
+                }))
+                .ok();
+            })
+            .await;
 
         // Update ingestion timestamp.
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
@@ -80,13 +91,17 @@ pub(crate) async fn run(
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name)
             && entry.description.is_empty()
         {
-            send_progress(tx, "  Generating description...\n");
+            set_status(
+                tx,
+                &format!("Generating description for {taxonomy_name}..."),
+            );
             let description = router::generate_description(&store, &mut models.chat, 10).await;
             entry.description = description;
             entry.description_updated_at = Some(now);
         }
 
-        send_progress(tx, &format!("  Done.\n"));
+        let artifact_word = if count == 1 { "artifact" } else { "artifacts" };
+        summary_lines.push(format!("- **{taxonomy_name}**: {count} {artifact_word}"));
     }
 
     if let Err(e) = manifest.save(&manifest_path) {
@@ -95,18 +110,22 @@ pub(crate) async fn run(
         return;
     }
 
-    tx.send(Event::CommandDone(CommandResult::Message(
-        "Ingestion complete.".into(),
-    )))
-    .ok();
+    let summary = format!("## Ingestion complete\n\n{}", summary_lines.join("\n"));
+    tx.send(Event::CommandDone(CommandResult::Message(summary)))
+        .ok();
 }
 
-fn send_progress(tx: &mpsc::UnboundedSender<Event>, text: &str) {
-    tx.send(Event::Token(text.to_string())).ok();
+fn set_status(tx: &mpsc::UnboundedSender<Event>, text: &str) {
+    tx.send(Event::StatusText(text.to_string())).ok();
 }
 
 /// Finds the source config matching a given source type, host, and username.
-fn find_source<'a>(config: &'a Config, source_type: &str, source_host: &str, source_username: &str) -> Option<&'a SourceConfig> {
+fn find_source<'a>(
+    config: &'a Config,
+    source_type: &str,
+    source_host: &str,
+    source_username: &str,
+) -> Option<&'a SourceConfig> {
     config.source.iter().find(|s| match (source_type, s) {
         ("imap", SourceConfig::Imap(c)) => c.host == source_host && c.username == source_username,
         _ => false,

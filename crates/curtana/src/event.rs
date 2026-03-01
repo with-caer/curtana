@@ -4,6 +4,13 @@ use crossterm::event::Event as CrosstermEvent;
 use curtana_knows::manifest::TaxonomyEntry;
 use tokio::sync::mpsc;
 
+/// Structured progress for a long-running operation (e.g. embedding).
+pub struct Progress {
+    pub current: usize,
+    pub total: usize,
+    pub label: String,
+}
+
 /// Events produced by the terminal and background tasks.
 pub enum Event {
     /// A terminal event (key press, resize, etc.).
@@ -14,6 +21,12 @@ pub enum Event {
     CommandDone(CommandResult),
     /// An error from a background task.
     Error(String),
+    /// Timer tick for animations (spinner, progress bar).
+    Tick,
+    /// Progress update for a long-running operation.
+    Progress(Progress),
+    /// Update the loading status message in the header.
+    StatusText(String),
 }
 
 /// Result of a completed command.
@@ -25,9 +38,7 @@ pub enum CommandResult {
         entries: Vec<(String, TaxonomyEntry)>,
     },
     /// Discovery phase 1: folder list for user selection.
-    DiscoverFolders {
-        folders: Vec<DiscoverFolder>,
-    },
+    DiscoverFolders { folders: Vec<DiscoverFolder> },
     /// A simple message response.
     Message(String),
 }
@@ -111,12 +122,24 @@ impl EventStream {
 
         // Spawn a dedicated thread for crossterm terminal event polling.
         let term_tx = tx.clone();
-        std::thread::spawn(move || loop {
-            if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(evt) = crossterm::event::read() {
-                    if term_tx.send(Event::Terminal(evt)).is_err() {
-                        break;
-                    }
+        std::thread::spawn(move || {
+            loop {
+                if crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false)
+                    && let Ok(evt) = crossterm::event::read()
+                    && term_tx.send(Event::Terminal(evt)).is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Spawn a tick thread for animations (~12.5fps).
+        let tick_tx = tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                if tick_tx.send(Event::Tick).is_err() {
+                    break;
                 }
             }
         });

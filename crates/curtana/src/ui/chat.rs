@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use super::markdown;
 use crate::app::{ActivePane, App, Role};
@@ -45,7 +45,11 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let focused = app.active_pane == ActivePane::Chat || app.detail_panel.is_none();
-    let border_color = if focused { Color::Cyan } else { Color::DarkGray };
+    let border_color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)

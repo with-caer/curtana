@@ -48,13 +48,12 @@ pub(crate) async fn run(
                     discovered.into_iter().filter(|f| f.is_selectable).collect();
 
                 for folder in selectable {
-                    let already_tracked = manifest
-                        .taxonomies
-                        .values()
-                        .any(|t| t.source_type == "imap"
+                    let already_tracked = manifest.taxonomies.values().any(|t| {
+                        t.source_type == "imap"
                             && t.source_id == folder.name
                             && t.source_host == imap_config.host
-                            && t.source_username == imap_config.username);
+                            && t.source_username == imap_config.username
+                    });
 
                     let index = entries.len() + 1;
                     folders.push(DiscoverFolder {
@@ -82,8 +81,10 @@ pub(crate) async fn run(
         return None;
     }
 
-    tx.send(Event::CommandDone(CommandResult::DiscoverFolders { folders }))
-        .ok();
+    tx.send(Event::CommandDone(CommandResult::DiscoverFolders {
+        folders,
+    }))
+    .ok();
 
     Some(DiscoverState { entries })
 }
@@ -133,7 +134,11 @@ pub(crate) fn select(
 
     for i in indices {
         let entry = &state.entries[i];
-        let taxonomy_name = format!("imap-{}-{}", sanitize_source_label(&entry.source_username, &entry.source_host), sanitize_name(&entry.folder_name));
+        let taxonomy_name = format!(
+            "imap-{}-{}",
+            sanitize_source_label(&entry.source_username, &entry.source_host),
+            sanitize_name(&entry.folder_name)
+        );
 
         if manifest.taxonomies.contains_key(&taxonomy_name) {
             skipped.push(taxonomy_name);
@@ -164,13 +169,21 @@ pub(crate) fn select(
 
     let mut msg = String::new();
     if !added.is_empty() {
-        msg.push_str(&format!("Added {} taxonomies: {}", added.len(), added.join(", ")));
+        msg.push_str(&format!(
+            "Added {} taxonomies: {}",
+            added.len(),
+            added.join(", ")
+        ));
     }
     if !skipped.is_empty() {
         if !msg.is_empty() {
             msg.push('\n');
         }
-        msg.push_str(&format!("Skipped {} (already tracked): {}", skipped.len(), skipped.join(", ")));
+        msg.push_str(&format!(
+            "Skipped {} (already tracked): {}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
     }
 
     tx.send(Event::CommandDone(CommandResult::Message(msg)))

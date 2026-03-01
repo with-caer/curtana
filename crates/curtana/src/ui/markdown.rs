@@ -1,4 +1,4 @@
-use markdown::{to_mdast, ParseOptions};
+use markdown::{ParseOptions, to_mdast};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -102,8 +102,7 @@ impl RenderContext {
             }
 
             Node::Blockquote(blockquote) => {
-                let bar =
-                    Span::styled("\u{258e} ", Style::default().fg(Color::DarkGray));
+                let bar = Span::styled("\u{258e} ", Style::default().fg(Color::DarkGray));
                 let old_style = self.style;
                 self.style = self.style.patch(Style::default().fg(Color::DarkGray));
                 // Render children, then prefix each produced line with the bar.
@@ -137,7 +136,7 @@ impl RenderContext {
             | Node::Link(_)
             | Node::Break(_) => {
                 let mut spans = Vec::new();
-                self.collect_inline_spans(&[node.clone()], &mut spans);
+                self.collect_inline_spans(std::slice::from_ref(node), &mut spans);
                 self.lines.push(Line::from(spans));
             }
 

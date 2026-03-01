@@ -70,7 +70,7 @@ pub async fn ingest(config: &Config) {
         }
 
         info!("  Embedding...");
-        store.embed_pending(&mut models.embed).await;
+        store.embed_pending(&mut models.embed, |_, _| {}).await;
 
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
             entry.last_ingested_at = Some(now);

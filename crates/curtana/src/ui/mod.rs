@@ -3,13 +3,16 @@ mod detail;
 mod input;
 mod markdown;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
 use crate::app::{App, AppStatus};
+
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const PROGRESS_WIDTH: usize = 20;
 
 /// Renders the entire TUI.
 pub fn render(frame: &mut Frame, app: &App) {
@@ -30,27 +33,60 @@ pub fn render(frame: &mut Frame, app: &App) {
     let input_area = chunks[2];
 
     // Header with status.
-    let title = match &app.status {
-        AppStatus::Idle => Span::styled(
-            " curtana",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        AppStatus::Loading(msg) => Span::styled(
-            format!(" curtana \u{2014} {msg}"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        AppStatus::AwaitingDiscoverSelection => Span::styled(
-            " curtana \u{2014} select folders to track",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
+    let brand = Span::styled(
+        " curtana",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let yellow_bold = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let header_line = match &app.status {
+        AppStatus::Idle => Line::from(brand),
+        AppStatus::Loading(_) if app.progress.is_some() => {
+            let p = app.progress.as_ref().unwrap();
+            let filled = if p.total > 0 {
+                (p.current * PROGRESS_WIDTH) / p.total
+            } else {
+                0
+            };
+            let empty = PROGRESS_WIDTH - filled;
+            let bar = format!(
+                "{}{} {}/{}",
+                "\u{2501}".repeat(filled),
+                "\u{254c}".repeat(empty),
+                p.current,
+                p.total,
+            );
+            Line::from(vec![
+                brand,
+                Span::styled(" \u{2014} ", yellow_bold),
+                Span::styled(p.label.clone(), yellow_bold),
+                Span::styled(" [", yellow_bold),
+                Span::styled(bar, yellow_bold),
+                Span::styled("]", yellow_bold),
+            ])
+        }
+        AppStatus::Loading(msg) => {
+            let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+            Line::from(vec![
+                brand,
+                Span::styled(format!(" \u{2014} {spinner} {msg}"), yellow_bold),
+            ])
+        }
+        AppStatus::AwaitingDiscoverSelection => Line::from(vec![
+            brand,
+            Span::styled(
+                " \u{2014} select folders to track",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
     };
-    frame.render_widget(Paragraph::new(title), header_area);
+    frame.render_widget(Paragraph::new(header_line), header_area);
 
     // Body: chat area + optional detail panel.
     if app.detail_panel.is_some() {

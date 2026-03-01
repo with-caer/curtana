@@ -69,10 +69,7 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn run_tui(
-    config: Arc<Config>,
-    auto_command: Option<CommandRequest>,
-) -> io::Result<()> {
+async fn run_tui(config: Arc<Config>, auto_command: Option<CommandRequest>) -> io::Result<()> {
     // Install a panic hook that restores the terminal before printing
     // the panic message, so it is readable.
     let original_hook = std::panic::take_hook();
