@@ -9,9 +9,9 @@ authors.workspace = true
 
 [dependencies]
 # Data encoding.
-codas = { path = "../../../codas/codas", features = ["serde"] }
-codas-flow = { path = "../../../codas/codas-flow" }
-codas-macros = { path = "../../../codas/codas-macros", features = ["serde"] }
+codas = { version = "0.7.0", features = ["serde"] }
+codas-flow = { version = "0.7.0" }
+codas-macros = { version = "0.7.0", features = ["serde"] }
 
 # Persistence.
 duckdb = { version = "1.2.2", features = ["bundled"] }
