@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, app: &App) {
                 Span::styled(format!(" \u{2014} {spinner} {msg}"), yellow_bold),
             ])
         }
-        AppStatus::AwaitingDiscoverSelection => Line::from(vec![
+        AppStatus::AwaitingExploreSelection => Line::from(vec![
             brand,
             Span::styled(
                 " \u{2014} select folders to track",

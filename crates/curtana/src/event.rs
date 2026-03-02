@@ -39,14 +39,14 @@ pub enum CommandResult {
     Status {
         entries: Vec<(String, TaxonomyEntry)>,
     },
-    /// Discovery phase 1: folder list for user selection.
-    DiscoverFolders { folders: Vec<DiscoverFolder> },
+    /// Explore phase 1: folder list for user selection.
+    ExploreFolders { folders: Vec<ExploreFolder> },
     /// A simple message response.
     Message(String),
 }
 
 /// A discovered folder shown to the user for selection.
-pub struct DiscoverFolder {
+pub struct ExploreFolder {
     pub index: usize,
     pub name: String,
     pub source_host: String,

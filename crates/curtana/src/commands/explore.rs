@@ -1,31 +1,29 @@
-use std::path::Path;
-
 use curtana_knows::manifest::{Manifest, TaxonomyEntry};
 use curtana_reads::imap;
 use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
-use crate::event::{CommandResult, DiscoverFolder, Event};
+use crate::event::{CommandResult, Event, ExploreFolder};
 
-/// State retained between the two discovery phases.
-pub(crate) struct DiscoverState {
-    pub entries: Vec<DiscoverStateEntry>,
+/// State retained between the two explore phases.
+pub(crate) struct ExploreState {
+    pub entries: Vec<ExploreStateEntry>,
 }
 
-pub(crate) struct DiscoverStateEntry {
+pub(crate) struct ExploreStateEntry {
     pub folder_name: String,
     pub source_host: String,
     pub source_username: String,
 }
 
-/// Phase 1: connect to sources, discover folders, send listing to UI.
+/// Phase 1: connect to sources, explore folders, send listing to UI.
 ///
 /// Returns state to hold until the user makes a selection.
 pub(crate) async fn run(
     config: &Config,
     tx: &mpsc::UnboundedSender<Event>,
-) -> Option<DiscoverState> {
-    let data_dir = Path::new(config.data_dir());
+) -> Option<ExploreState> {
+    let data_dir = config.data_dir();
     let manifest_path = data_dir.join("manifest.toml");
 
     let manifest = match Manifest::load(&manifest_path) {
@@ -62,14 +60,14 @@ pub(crate) async fn run(
                     });
 
                     let index = entries.len() + 1;
-                    folders.push(DiscoverFolder {
+                    folders.push(ExploreFolder {
                         index,
                         name: folder.name.clone(),
                         source_host: imap_config.host.clone(),
                         source_username: imap_config.username.clone(),
                         already_tracked,
                     });
-                    entries.push(DiscoverStateEntry {
+                    entries.push(ExploreStateEntry {
                         folder_name: folder.name,
                         source_host: imap_config.host.clone(),
                         source_username: imap_config.username.clone(),
@@ -87,22 +85,22 @@ pub(crate) async fn run(
         return None;
     }
 
-    tx.send(Event::CommandDone(CommandResult::DiscoverFolders {
+    tx.send(Event::CommandDone(CommandResult::ExploreFolders {
         folders,
     }))
     .ok();
 
-    Some(DiscoverState { entries })
+    Some(ExploreState { entries })
 }
 
 /// Phase 2: parse the user's selection and update the manifest.
 pub(crate) fn select(
     config: &Config,
     input: &str,
-    state: DiscoverState,
+    state: ExploreState,
     tx: &mpsc::UnboundedSender<Event>,
 ) {
-    let data_dir = Path::new(config.data_dir());
+    let data_dir = config.data_dir();
     let manifest_path = data_dir.join("manifest.toml");
 
     let mut manifest = match Manifest::load(&manifest_path) {

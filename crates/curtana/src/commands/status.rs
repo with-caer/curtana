@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use curtana_knows::manifest::Manifest;
 use tokio::sync::mpsc;
 
@@ -8,7 +6,7 @@ use crate::event::{CommandResult, Event};
 
 /// Loads the manifest and reports taxonomy listings.
 pub fn run(config: &Config, tx: &mpsc::UnboundedSender<Event>) {
-    let data_dir = Path::new(config.data_dir());
+    let data_dir = config.data_dir();
     let manifest_path = data_dir.join("manifest.toml");
 
     let manifest = match Manifest::load(&manifest_path) {
@@ -22,7 +20,7 @@ pub fn run(config: &Config, tx: &mpsc::UnboundedSender<Event>) {
 
     if manifest.taxonomies.is_empty() {
         tx.send(Event::CommandDone(CommandResult::Message(
-            "No taxonomies discovered yet. Run /discover to get started.".into(),
+            "No taxonomies found yet. Run /explore to get started.".into(),
         )))
         .ok();
         return;

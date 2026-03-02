@@ -9,7 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -25,22 +25,45 @@ use event::EventStream;
 #[command(name = "curtana", about = "Your AI concierge.")]
 struct Cli {
     /// Path to the config file.
-    #[arg(short, long, default_value = "Curtana.toml")]
-    config: PathBuf,
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Download default models and create ~/.curtana/ config.
+    Setup,
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let config = match Config::load(&cli.config) {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
 
-    run_tui(config).await
+    match cli.command {
+        Some(Commands::Setup) => commands::setup::run().await,
+        None => {
+            let config_path = match config::resolve_config_path(cli.config.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let config = match Config::load(&config_path) {
+                Ok(c) => Arc::new(c),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            run_tui(config).await
+        }
+    }
 }
 
 async fn run_tui(config: Arc<Config>) -> io::Result<()> {

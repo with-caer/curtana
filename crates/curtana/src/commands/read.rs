@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use curtana_knows::manifest::Manifest;
@@ -12,9 +11,9 @@ use crate::event::{CommandResult, Event, Progress};
 
 use super::Models;
 
-/// Runs the full ingest pipeline, updating header status and progress bar.
+/// Runs the full read pipeline, updating header status and progress bar.
 pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::UnboundedSender<Event>) {
-    let data_dir = Path::new(config.data_dir());
+    let data_dir = config.data_dir();
     let manifest_path = data_dir.join("manifest.toml");
 
     let mut manifest = match Manifest::load(&manifest_path) {
@@ -28,7 +27,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
 
     if manifest.taxonomies.is_empty() {
         tx.send(Event::CommandDone(CommandResult::Message(
-            "No taxonomies in manifest \u{2014} run /discover first.".into(),
+            "No taxonomies in manifest \u{2014} run /explore first.".into(),
         )))
         .ok();
         return;
@@ -70,7 +69,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         let count = artifacts.len();
 
         // Upsert into taxonomy store.
-        let store = match open_taxonomy_store(data_dir, taxonomy_name).await {
+        let store = match open_taxonomy_store(&data_dir, taxonomy_name).await {
             Ok(s) => s,
             Err(e) => {
                 summary_lines.push(format!("- **{taxonomy_name}**: error opening store ({e})"));
@@ -129,7 +128,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         return;
     }
 
-    let summary = format!("## Ingestion complete\n\n{}", summary_lines.join("\n"));
+    let summary = format!("## Read complete\n\n{}", summary_lines.join("\n"));
     tx.send(Event::CommandDone(CommandResult::Message(summary)))
         .ok();
 }

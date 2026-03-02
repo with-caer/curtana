@@ -34,7 +34,7 @@ pub struct App {
 pub enum AppStatus {
     Idle,
     Loading(String),
-    AwaitingDiscoverSelection,
+    AwaitingExploreSelection,
 }
 
 pub struct Message {

@@ -34,3 +34,9 @@ clap = { version = "4", features = ["derive"] }
 # Markdown rendering.
 markdown = "1.0.0-alpha.21"
 
+# Setup command: model downloads, home dir, progress bars.
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+home = { workspace = true }
+indicatif = { workspace = true }
+

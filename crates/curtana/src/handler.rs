@@ -10,8 +10,8 @@ const HELP_TEXT: &str = "\
 
 - `<text>` \u{2014} Query your knowledge base
 - `/status` \u{2014} Show tracked taxonomies
-- `/discover` \u{2014} Discover and select source folders
-- `/ingest` \u{2014} Ingest artifacts and generate embeddings
+- `/explore` \u{2014} Explore and select source folders
+- `/read` \u{2014} Read artifacts and generate embeddings
 - `/help` \u{2014} Show this help
 - `/quit` \u{2014} Exit curtana
 
@@ -116,10 +116,10 @@ fn handle_key(
             if input.is_empty() {
                 return;
             }
-            if matches!(app.status, AppStatus::AwaitingDiscoverSelection) {
+            if matches!(app.status, AppStatus::AwaitingExploreSelection) {
                 app.add_message(Message::user(input.clone()));
                 app.status = AppStatus::Loading("Updating manifest...".into());
-                cmd_tx.send(CommandRequest::DiscoverSelect(input)).ok();
+                cmd_tx.send(CommandRequest::ExploreSelect(input)).ok();
             } else {
                 submit(app, &input, cmd_tx);
             }
@@ -151,15 +151,15 @@ fn submit(app: &mut App, input: &str, cmd_tx: &mpsc::UnboundedSender<CommandRequ
             app.status = AppStatus::Loading("Loading status...".into());
             cmd_tx.send(CommandRequest::Status).ok();
         }
-        Command::Discover => {
+        Command::Explore => {
             app.add_message(Message::user(input.to_string()));
-            app.status = AppStatus::Loading("Discovering...".into());
-            cmd_tx.send(CommandRequest::Discover).ok();
+            app.status = AppStatus::Loading("Exploring...".into());
+            cmd_tx.send(CommandRequest::Explore).ok();
         }
-        Command::Ingest => {
+        Command::Read => {
             app.add_message(Message::user(input.to_string()));
-            app.status = AppStatus::Loading("Ingesting...".into());
-            cmd_tx.send(CommandRequest::Ingest).ok();
+            app.status = AppStatus::Loading("Reading...".into());
+            cmd_tx.send(CommandRequest::Read).ok();
         }
         Command::Help => {
             app.add_message(Message::user(input.to_string()));
@@ -189,11 +189,11 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
             }
             app.add_message(Message::system(text));
         }
-        CommandResult::DiscoverFolders { folders } => {
+        CommandResult::ExploreFolders { folders } => {
             let mut text = String::from("## Available folders\n\n");
 
             // Group folders by source, preserving order of first appearance.
-            let mut groups: Vec<(String, Vec<&crate::event::DiscoverFolder>)> = Vec::new();
+            let mut groups: Vec<(String, Vec<&crate::event::ExploreFolder>)> = Vec::new();
             for f in &folders {
                 let label = format_source_label(&f.source_username, &f.source_host);
                 if let Some(group) = groups.iter_mut().find(|(l, _)| l == &label) {
@@ -218,7 +218,7 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
 
             text.push_str("Enter folder numbers (e.g. `1,3`) or `all`:");
             app.add_message(Message::system(text));
-            app.status = AppStatus::AwaitingDiscoverSelection;
+            app.status = AppStatus::AwaitingExploreSelection;
         }
         CommandResult::Message(msg) => {
             app.status = AppStatus::Idle;

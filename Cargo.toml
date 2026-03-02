@@ -24,6 +24,10 @@ curtana-knows = { path = "crates/curtana-knows" }
 tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tracing = "0.1"
+reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
+futures-util = "0.3"
+home = "0.5"
+indicatif = "0.17"
 
 [profile.dev]
 # Use release optimizations during testing to

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use curtana_knows::manifest::Manifest;
 use curtana_knows::router::{Router, ScoredArtifact};
 use curtana_knows::tools::{self, ToolExecutor, ToolResult};
@@ -20,7 +18,7 @@ pub(crate) async fn run(
     models: &mut Models,
     tx: &mpsc::UnboundedSender<Event>,
 ) {
-    let data_dir = Path::new(config.data_dir());
+    let data_dir = config.data_dir();
     let manifest_path = data_dir.join("manifest.toml");
 
     let manifest = match Manifest::load(&manifest_path) {
@@ -34,7 +32,7 @@ pub(crate) async fn run(
 
     if manifest.taxonomies.is_empty() {
         tx.send(Event::Error(
-            "no taxonomies found \u{2014} run /discover first".into(),
+            "no taxonomies found \u{2014} run /explore first".into(),
         ))
         .ok();
         return;

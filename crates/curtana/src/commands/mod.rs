@@ -1,7 +1,8 @@
 pub mod agent;
-pub mod discover;
-pub mod ingest;
+pub mod explore;
 pub mod query;
+pub mod read;
+pub mod setup;
 pub mod status;
 
 use std::io;
@@ -23,16 +24,16 @@ pub struct CommandInfo {
 /// All slash commands, sorted alphabetically for the completion popup.
 pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
-        name: "/discover",
-        description: "Discover source folders",
+        name: "/explore",
+        description: "Explore source folders",
     },
     CommandInfo {
         name: "/help",
         description: "Show help",
     },
     CommandInfo {
-        name: "/ingest",
-        description: "Ingest artifacts",
+        name: "/read",
+        description: "Read from sources",
     },
     CommandInfo {
         name: "/quit",
@@ -47,8 +48,8 @@ pub const COMMANDS: &[CommandInfo] = &[
 /// Parsed user command.
 pub enum Command {
     Query(String),
-    Discover,
-    Ingest,
+    Explore,
+    Read,
     Status,
     Help,
     Quit,
@@ -58,9 +59,9 @@ pub enum Command {
 pub enum CommandRequest {
     Query(String),
     Status,
-    Discover,
-    DiscoverSelect(String),
-    Ingest,
+    Explore,
+    ExploreSelect(String),
+    Read,
 }
 
 /// Holds loaded models for reuse across commands.
@@ -221,8 +222,8 @@ pub fn parse(input: &str) -> Command {
     let trimmed = input.trim();
     if trimmed.starts_with('/') {
         match trimmed.split_whitespace().next().unwrap_or("") {
-            "/discover" => Command::Discover,
-            "/ingest" => Command::Ingest,
+            "/explore" => Command::Explore,
+            "/read" => Command::Read,
             "/status" => Command::Status,
             "/help" => Command::Help,
             "/quit" | "/exit" => Command::Quit,
@@ -252,7 +253,7 @@ pub fn spawn_command_thread(
 
         rt.block_on(async {
             let mut models: Option<Models> = None;
-            let mut discover_state: Option<discover::DiscoverState> = None;
+            let mut explore_state: Option<explore::ExploreState> = None;
 
             while let Some(request) = cmd_rx.recv().await {
                 match request {
@@ -276,19 +277,19 @@ pub fn spawn_command_thread(
                     CommandRequest::Status => {
                         status::run(&config, &event_tx);
                     }
-                    CommandRequest::Discover => {
-                        discover_state = discover::run(&config, &event_tx).await;
+                    CommandRequest::Explore => {
+                        explore_state = explore::run(&config, &event_tx).await;
                     }
-                    CommandRequest::DiscoverSelect(input) => {
-                        if let Some(state) = discover_state.take() {
-                            discover::select(&config, &input, state, &event_tx);
+                    CommandRequest::ExploreSelect(input) => {
+                        if let Some(state) = explore_state.take() {
+                            explore::select(&config, &input, state, &event_tx);
                         } else {
                             event_tx
-                                .send(Event::Error("No pending discovery session.".into()))
+                                .send(Event::Error("No pending explore session.".into()))
                                 .ok();
                         }
                     }
-                    CommandRequest::Ingest => {
+                    CommandRequest::Read => {
                         if models.is_none() {
                             match load_models(&config) {
                                 Ok(m) => models = Some(m),
@@ -299,7 +300,7 @@ pub fn spawn_command_thread(
                             }
                         }
                         let m = models.as_mut().unwrap();
-                        ingest::run(&config, m, &event_tx).await;
+                        read::run(&config, m, &event_tx).await;
                     }
                 }
             }
@@ -360,12 +361,34 @@ mod tests {
 fn load_models(config: &Config) -> Result<Models, String> {
     let registry =
         ModelRegistry::new().map_err(|e| format!("failed to init model registry: {e:?}"))?;
+
+    let chat_path = config.chat_model_path();
+    let chat_path_str = chat_path.to_str().ok_or_else(|| {
+        format!(
+            "chat model path is not valid UTF-8: {}",
+            chat_path.display()
+        )
+    })?;
     let chat = registry
-        .load_chat_model(&config.chat_model, "You are a helpful assistant.")
-        .map_err(|e| format!("failed to load chat model: {e:?}"))?;
+        .load_chat_model(chat_path_str, "You are a helpful assistant.")
+        .map_err(|e| format!("failed to load chat model '{}': {e:?}", chat_path.display()))?;
+
+    let embed_path = config.embed_model_path();
+    let embed_path_str = embed_path.to_str().ok_or_else(|| {
+        format!(
+            "embed model path is not valid UTF-8: {}",
+            embed_path.display()
+        )
+    })?;
     let embed = registry
-        .load_text_embedding_model(&config.embed_model)
-        .map_err(|e| format!("failed to load embedding model: {e:?}"))?;
+        .load_text_embedding_model(embed_path_str)
+        .map_err(|e| {
+            format!(
+                "failed to load embedding model '{}': {e:?}",
+                embed_path.display()
+            )
+        })?;
+
     Ok(Models {
         chat,
         embed,
