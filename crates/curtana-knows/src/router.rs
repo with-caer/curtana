@@ -339,7 +339,10 @@ mod tests {
 
     #[test]
     fn strip_think_no_tags() {
-        assert_eq!(strip_think_tags("Just a plain string."), "Just a plain string.");
+        assert_eq!(
+            strip_think_tags("Just a plain string."),
+            "Just a plain string."
+        );
     }
 
     #[test]
