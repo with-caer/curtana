@@ -181,10 +181,16 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
             app.status = AppStatus::Idle;
             let mut text = String::from("## Tracked taxonomies\n\n");
             for (name, entry) in &entries {
-                if entry.description.is_empty() {
+                // Use only the first non-empty line to keep the list intact.
+                let short_desc = entry
+                    .description
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                if short_desc.is_empty() {
                     text.push_str(&format!("- **{name}**\n"));
                 } else {
-                    text.push_str(&format!("- **{name}** \u{2014} {}\n", entry.description));
+                    text.push_str(&format!("- **{name}** \u{2014} {short_desc}\n"));
                 }
             }
             app.add_message(Message::system(text));

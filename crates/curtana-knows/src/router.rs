@@ -295,5 +295,63 @@ pub async fn generate_description(
         warn!("failed to generate description: {e:?}");
         return String::new();
     }
-    String::from_utf8_lossy(&output).trim().to_string()
+    strip_think_tags(&String::from_utf8_lossy(&output))
+}
+
+/// Strips `<think>...</think>` reasoning blocks that some local models emit,
+/// then trims surrounding whitespace.
+fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => rest = &rest[start + end + "</think>".len()..],
+            None => {
+                // Unclosed tag — drop everything from <think> onward.
+                return result.trim().to_string();
+            }
+        }
+    }
+    result.push_str(rest);
+    result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_think_empty_block() {
+        assert_eq!(
+            strip_think_tags("<think>\n\n</think>\nActual description."),
+            "Actual description."
+        );
+    }
+
+    #[test]
+    fn strip_think_with_content() {
+        assert_eq!(
+            strip_think_tags("<think>reasoning here</think>Answer."),
+            "Answer."
+        );
+    }
+
+    #[test]
+    fn strip_think_no_tags() {
+        assert_eq!(strip_think_tags("Just a plain string."), "Just a plain string.");
+    }
+
+    #[test]
+    fn strip_think_unclosed() {
+        assert_eq!(strip_think_tags("before<think>oops no close"), "before");
+    }
+
+    #[test]
+    fn strip_think_multiple() {
+        assert_eq!(
+            strip_think_tags("<think>a</think>one<think>b</think>two"),
+            "onetwo"
+        );
+    }
 }
