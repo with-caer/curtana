@@ -2,24 +2,26 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
 use super::markdown;
 use crate::app::{App, Role};
 
 /// Renders the scrollable chat message history.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+
     let mut lines: Vec<Line> = Vec::new();
-    let inner_width = area.width.saturating_sub(2);
 
-    // Show sword art + welcome text on the welcome screen.
-    let show_welcome = !app.messages.iter().any(|m| m.role == Role::User);
-    if show_welcome {
-        lines.extend(welcome_screen(inner_width));
-    }
+    // Sword art + welcome text always at the top of chat history.
+    lines.extend(welcome_screen(inner.width));
 
-    let skip = if show_welcome { 1 } else { 0 };
-    for message in app.messages.iter().skip(skip) {
+    // Skip the first message (welcome text is integrated into the art).
+    for message in app.messages.iter().skip(1) {
         // Add a blank line between messages (skip before the first).
         if !lines.is_empty() {
             lines.push(Line::from(""));
@@ -58,17 +60,12 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner_height = area.height.saturating_sub(2) as usize;
-
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false });
 
-    let line_count = paragraph.line_count(inner_width);
-    let max_scroll = line_count.saturating_sub(inner_height);
+    let line_count = paragraph.line_count(inner.width);
+    let max_scroll = line_count.saturating_sub(inner.height as usize);
     let scroll = max_scroll.saturating_sub(app.scroll_offset);
 
     let paragraph = paragraph.scroll((scroll as u16, 0));
@@ -110,11 +107,11 @@ fn welcome_screen(inner_width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     for (i, art_line) in art.iter().enumerate() {
         let mut spans = vec![Span::styled(*art_line, sword)];
-        if i >= TEXT_OFFSET {
-            if let Some(text) = wrapped.get(i - TEXT_OFFSET) {
-                spans.push(Span::raw(" ".repeat(GAP)));
-                spans.push(Span::styled(text.clone(), text_style));
-            }
+        if i >= TEXT_OFFSET
+            && let Some(text) = wrapped.get(i - TEXT_OFFSET)
+        {
+            spans.push(Span::raw(" ".repeat(GAP)));
+            spans.push(Span::styled(text.clone(), text_style));
         }
         lines.push(Line::from(spans));
     }

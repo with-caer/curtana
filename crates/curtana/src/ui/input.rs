@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Padding, Paragraph};
 
 use crate::app::App;
 
@@ -19,19 +19,17 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
 
     let paragraph = Paragraph::new(display).style(style).block(block);
     frame.render_widget(paragraph, area);
 
-    // Position the cursor.
-    {
-        let prefix_width = 2u16; // "> "
-        let cursor_offset = app.input[..app.cursor_position].chars().count() as u16;
-        let cursor_x = area.x + 1 + prefix_width + cursor_offset;
-        let cursor_y = area.y + 1;
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
+    // Position the cursor inside the padded content area.
+    let prefix_width = 2u16; // "> "
+    let cursor_offset = app.input[..app.cursor_position].chars().count() as u16;
+    frame.set_cursor_position((inner.x + prefix_width + cursor_offset, inner.y));
 
     // Render completion popup above the input area.
     if let Some(cs) = &app.completion {
