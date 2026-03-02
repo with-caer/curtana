@@ -715,7 +715,9 @@ dependencies = [
 
 [[package]]
 name = "codas"
-version = "0.6.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4b2f403a67978838fc796d70b280cf0a8f1ec75c3be32e1abb0f7237603e739"
 dependencies = [
  "argon2",
  "blake3",
@@ -730,7 +732,9 @@ dependencies = [
 
 [[package]]
 name = "codas-flow"
-version = "0.6.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7090552af3f2bb070e108c0b739569d102f4bdf83061177c93d4d7d75a1b4010"
 dependencies = [
  "codas",
  "portable-atomic",
@@ -740,7 +744,9 @@ dependencies = [
 
 [[package]]
 name = "codas-macros"
-version = "0.6.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa25e81462e31156a38e6846b0b11b9bdddebb9cf293cde5daccb007d977ada"
 dependencies = [
  "codas",
 ]
