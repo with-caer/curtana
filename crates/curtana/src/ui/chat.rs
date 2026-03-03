@@ -29,6 +29,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 
         match message.role {
             Role::Assistant | Role::System => {
+                // 2-space indent to align with user "> " prefix.
+                let indent = Span::raw("  ");
                 if message.content.is_empty() {
                     if !app.activity_lines.is_empty() {
                         let dim = Style::default().fg(Color::DarkGray);
@@ -37,12 +39,20 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                         }
                     }
                     // Streaming placeholder cursor.
-                    lines.push(Line::from(Span::styled(
-                        "\u{2588}",
-                        Style::default().fg(Color::DarkGray),
-                    )));
+                    lines.push(Line::from(vec![
+                        indent,
+                        Span::styled("\u{2588}", Style::default().fg(Color::DarkGray)),
+                    ]));
                 } else {
-                    lines.extend(markdown::to_lines(&message.content));
+                    // Pre-wrap so every continuation line keeps the indent.
+                    let content_width = (inner.width as usize).saturating_sub(2);
+                    for line in markdown::to_lines(&message.content) {
+                        for wrapped in wrap_spans(line.spans, content_width) {
+                            let mut spans = vec![indent.clone()];
+                            spans.extend(wrapped);
+                            lines.push(Line::from(spans));
+                        }
+                    }
                 }
             }
             Role::User => {
@@ -50,6 +60,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD);
                 for (i, text_line) in message.content.lines().enumerate() {
+                    // "> " on the first line, "  " on continuations to keep alignment.
                     let prefix = if i == 0 { "> " } else { "  " };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, style),
@@ -116,6 +127,91 @@ fn welcome_screen(inner_width: u16) -> Vec<Line<'static>> {
         lines.push(Line::from(spans));
     }
     lines
+}
+
+/// Wrap styled spans to fit within `max_width` columns, breaking at word boundaries.
+/// Returns one `Vec<Span>` per wrapped line, preserving span styles across breaks.
+fn wrap_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    if max_width == 0 {
+        return vec![spans];
+    }
+
+    // Flatten to (char, style) pairs.
+    let flat: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+
+    if flat.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut result: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut start = 0;
+
+    while start < flat.len() {
+        let remaining = flat.len() - start;
+        if remaining <= max_width {
+            result.push(group_spans(&flat[start..]));
+            break;
+        }
+
+        // Find the last space within max_width chars from start.
+        let end = start + max_width;
+        let break_at = flat[start..end]
+            .iter()
+            .rposition(|(c, _)| *c == ' ')
+            .map(|p| start + p)
+            .unwrap_or(end); // force break if no space found
+
+        if break_at <= start {
+            // No viable break point; force break at max_width.
+            result.push(group_spans(&flat[start..end]));
+            start = end;
+            continue;
+        }
+
+        result.push(group_spans(&flat[start..break_at]));
+
+        // Skip the space at the break point.
+        start = break_at;
+        if start < flat.len() && flat[start].0 == ' ' {
+            start += 1;
+        }
+    }
+
+    if result.is_empty() {
+        result.push(Vec::new());
+    }
+
+    result
+}
+
+/// Group consecutive (char, style) pairs with the same style back into `Span`s.
+fn group_spans(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    let mut current_style: Option<Style> = None;
+
+    for &(ch, style) in chars {
+        if current_style == Some(style) {
+            text.push(ch);
+        } else {
+            if let Some(s) = current_style {
+                spans.push(Span::styled(std::mem::take(&mut text), s));
+            }
+            text.push(ch);
+            current_style = Some(style);
+        }
+    }
+
+    if let Some(s) = current_style
+        && !text.is_empty()
+    {
+        spans.push(Span::styled(text, s));
+    }
+
+    spans
 }
 
 /// Word-wrap text to fit within `max_width` columns.

@@ -83,6 +83,22 @@ async fn run_tui(config: Arc<Config>) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Ensure the terminal is restored on all exit paths (error, break, etc.),
+    // not just clean exits. The panic hook covers panics; this covers `?`.
+    let result = run_event_loop(&mut terminal, config).await;
+
+    // Restore the terminal.
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
+}
+
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    config: Arc<Config>,
+) -> io::Result<()> {
     // Create the event stream and command thread.
     let mut events = EventStream::new();
     let cmd_tx = commands::spawn_command_thread(config, events.tx());
@@ -100,11 +116,6 @@ async fn run_tui(config: Arc<Config>) -> io::Result<()> {
             break;
         }
     }
-
-    // Restore the terminal.
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
 
     Ok(())
 }

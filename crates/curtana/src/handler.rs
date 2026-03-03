@@ -61,6 +61,10 @@ pub fn handle_event(app: &mut App, event: Event, cmd_tx: &mpsc::UnboundedSender<
             app.activity_lines.push(line);
             app.scroll_to_bottom();
         }
+        // Resize events are handled automatically by ratatui's autoresize()
+        // inside terminal.draw(). The event just triggers a redraw via the
+        // main loop.
+        Event::Terminal(CrosstermEvent::Resize(_, _)) => {}
         _ => {}
     }
 }
