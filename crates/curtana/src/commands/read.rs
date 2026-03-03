@@ -2,8 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use curtana_knows::manifest::Manifest;
 use curtana_knows::{Artifact, open_taxonomy_store, router};
-use curtana_reads::ToMarkdown;
 use curtana_reads::imap;
+use curtana_reads::{SourceItem, ToMarkdown};
 use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
@@ -47,25 +47,28 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         set_status(tx, &format!("Fetching {taxonomy_name}..."));
 
         // Fetch artifacts from source.
-        let artifacts = match find_source(
+        let (artifacts, new_cursor) = match find_source(
             config,
             &entry.source_type,
             &entry.source_host,
             &entry.source_username,
         ) {
-            Some(source) => match fetch_artifacts(source, &entry.source_id).await {
-                Ok(a) => a,
-                Err(e) => {
-                    summary_lines.push(format!("- **{taxonomy_name}**: error ({e})"));
-                    continue;
+            Some(source) => {
+                match fetch_artifacts(source, &entry.source_id, entry.cursor.as_deref()).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        summary_lines.push(format!("- **{taxonomy_name}**: error ({e})"));
+                        continue;
+                    }
                 }
-            },
+            }
             None => {
                 summary_lines.push(format!("- **{taxonomy_name}**: skipped (no source config)"));
                 continue;
             }
         };
 
+        let is_incremental = entry.cursor.is_some();
         let count = artifacts.len();
 
         // Upsert into taxonomy store.
@@ -100,9 +103,12 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
             continue;
         }
 
-        // Update ingestion timestamp.
+        // Update ingestion timestamp and cursor.
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
             entry.last_ingested_at = Some(now);
+            if new_cursor.is_some() {
+                entry.cursor = new_cursor;
+            }
         }
 
         // Generate description if empty.
@@ -119,7 +125,14 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         }
 
         let artifact_word = if count == 1 { "artifact" } else { "artifacts" };
-        summary_lines.push(format!("- **{taxonomy_name}**: {count} {artifact_word}"));
+        let mode = if is_incremental {
+            "incremental"
+        } else {
+            "full"
+        };
+        summary_lines.push(format!(
+            "- **{taxonomy_name}**: {count} new {artifact_word} ({mode})"
+        ));
     }
 
     if let Err(e) = manifest.save(&manifest_path) {
@@ -150,11 +163,12 @@ fn find_source<'a>(
     })
 }
 
-/// Fetches artifacts from a source folder.
+/// Fetches artifacts from a source folder, optionally resuming from a cursor.
 async fn fetch_artifacts(
     source: &SourceConfig,
     folder_name: &str,
-) -> Result<Vec<Artifact>, String> {
+    cursor: Option<&str>,
+) -> Result<(Vec<Artifact>, Option<String>), String> {
     match source {
         SourceConfig::Imap(base_config) => {
             let folder_config = imap::ImapConfig {
@@ -163,25 +177,27 @@ async fn fetch_artifacts(
                 username: base_config.username.clone(),
                 password: base_config.password.clone(),
                 mailbox: Some(folder_name.to_string()),
-                sequence: base_config.sequence.clone(),
                 starttls: base_config.starttls,
                 accept_invalid_certs: base_config.accept_invalid_certs,
             };
 
-            let emails = imap::fetch_emails(&folder_config)
+            let result = imap::fetch_emails(&folder_config, cursor)
                 .await
                 .map_err(|e| e.to_string())?;
 
-            Ok(emails
+            let artifacts = result
+                .items
                 .into_iter()
-                .map(|email| Artifact {
-                    id: email.message_id.clone().into(),
-                    timestamp: email.timestamp as u64,
-                    author: email.from.clone().into(),
-                    contents: email.to_markdown().into(),
+                .map(|item| Artifact {
+                    id: item.id().into(),
+                    timestamp: item.timestamp() as u64,
+                    author: item.author().into(),
+                    contents: item.to_markdown().into(),
                     embedding: Vec::new(),
                 })
-                .collect())
+                .collect();
+
+            Ok((artifacts, result.cursor))
         }
     }
 }

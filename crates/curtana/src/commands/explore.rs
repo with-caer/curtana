@@ -160,6 +160,7 @@ pub(crate) fn select(
                 source_username: entry.source_username.clone(),
                 last_ingested_at: None,
                 description_updated_at: None,
+                cursor: None,
             },
         );
         added.push(taxonomy_name);

@@ -4,11 +4,11 @@ use async_native_tls::TlsConnector;
 use chrono::DateTime;
 use futures::TryStreamExt;
 use mail_parser::MessageParser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tracing::warn;
 
-use crate::ToMarkdown;
+use crate::{ReadResult, SourceItem, ToMarkdown};
 
 pub struct EmailMessage {
     /// Value of the `Message-ID` header.
@@ -178,22 +178,57 @@ pub async fn discover_folders(config: &ImapConfig) -> Result<Vec<ImapFolder>, Im
     Ok(folders)
 }
 
-pub async fn fetch_emails(config: &ImapConfig) -> Result<Vec<EmailMessage>, ImapError> {
+/// Fetches emails from an IMAP mailbox, optionally resuming from a cursor.
+///
+/// When `cursor` is `None`, performs a full fetch. When a valid cursor is
+/// provided and the mailbox's UIDVALIDITY still matches, only fetches
+/// messages with UIDs higher than the cursor's `max_uid`.
+pub async fn fetch_emails(
+    config: &ImapConfig,
+    cursor: Option<&str>,
+) -> Result<ReadResult<EmailMessage>, ImapError> {
     let mut guard = imap_session(config).await?;
     let session = guard.inner_mut();
 
-    let mailbox = config.mailbox.as_deref().unwrap_or("INBOX");
-    let sequence = config.sequence.as_deref().unwrap_or("1:*");
+    let mailbox_name = config.mailbox.as_deref().unwrap_or("INBOX");
 
-    // Request access to the mailbox.
-    session
-        .select(mailbox)
+    // Select the mailbox and capture UIDVALIDITY.
+    let mailbox = session
+        .select(mailbox_name)
         .await
         .map_err(|e| ImapError::SessionError(e.to_string()))?;
 
-    // Fetch messages in this mailbox, along with their RFC822 field.
+    let server_uid_validity = mailbox.uid_validity;
+
+    // Decode existing cursor, if any.
+    let prev_cursor: Option<ImapCursor> = cursor.and_then(|c| match serde_json::from_str(c) {
+        Ok(parsed) => Some(parsed),
+        Err(e) => {
+            warn!("ignoring malformed IMAP cursor: {e}");
+            None
+        }
+    });
+
+    // Determine UID fetch range.
+    let (uid_set, min_uid_filter) = if let Some(ref prev) = prev_cursor
+        && Some(prev.uid_validity) == server_uid_validity
+    {
+        // Incremental: fetch UIDs above max_uid.
+        // IMAP "n:*" always returns at least the message at n if it exists,
+        // so we filter it out below.
+        let start = prev.max_uid.saturating_add(1);
+        (format!("{start}:*"), Some(prev.max_uid))
+    } else {
+        if prev_cursor.is_some() {
+            warn!("UIDVALIDITY changed for {mailbox_name} — performing full re-fetch");
+        }
+        // Full fetch: all UIDs.
+        ("1:*".to_string(), None)
+    };
+
+    // Fetch messages by UID.
     let messages_stream = session
-        .fetch(sequence, "RFC822")
+        .uid_fetch(&uid_set, "RFC822")
         .await
         .map_err(|e| ImapError::FetchFailed(e.to_string()))?;
     let raw_messages: Vec<_> = messages_stream
@@ -201,96 +236,122 @@ pub async fn fetch_emails(config: &ImapConfig) -> Result<Vec<EmailMessage>, Imap
         .await
         .map_err(|e| ImapError::FetchFailed(e.to_string()))?;
 
-    // Parse messages, skipping any that fail to parse.
-    let mut messages: Vec<_> = raw_messages
-        .into_iter()
-        .filter_map(|m| {
-            let body = match m.body() {
-                Some(b) => b,
-                None => {
-                    warn!("skipping message with no body");
-                    return None;
-                }
-            };
-            match MessageParser::default().parse(body) {
-                Some(message) => Some(message.into_owned()),
-                None => {
-                    warn!("skipping unparseable message");
-                    None
-                }
-            }
-        })
-        .collect();
+    // Track the highest UID seen for the next cursor.
+    let mut max_uid_seen: Option<u32> = prev_cursor.as_ref().map(|c| c.max_uid);
 
-    // Sort messages in descending order by date, similar to default inbox sorting.
-    messages.sort_by(|a, b| {
-        let a_date = a.date();
-        let b_date = b.date();
-        match (a_date, b_date) {
-            (Some(a), Some(b)) => a.cmp(b).reverse(),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
+    // Parse messages, filtering out the IMAP n:* quirk.
+    let mut messages: Vec<EmailMessage> = Vec::new();
+    for raw in &raw_messages {
+        let uid = match raw.uid {
+            Some(uid) => uid,
+            None => {
+                warn!("skipping fetch result with no UID");
+                continue;
+            }
+        };
+
+        // Filter out the message at max_uid (IMAP "n:*" quirk).
+        if let Some(min) = min_uid_filter
+            && uid <= min
+        {
+            continue;
         }
-    });
 
-    // Extract message metadata and bodies, skipping messages without required fields.
-    let messages: Vec<_> = messages
-        .into_iter()
-        .filter_map(|m| {
-            let message_id = m.message_id().unwrap_or_default().to_owned();
-            if message_id.is_empty() {
-                warn!("skipping message with no Message-ID");
-                return None;
-            }
-            let from = m
-                .from()
-                .and_then(|a| a.first())
-                .and_then(|a| a.address())
-                .map(|a| a.to_string())
-                .unwrap_or_default();
-            let timestamp = m.date().map(|d| d.to_timestamp()).unwrap_or(0);
-            let subject = m.subject().unwrap_or_default().to_owned();
+        if let Some(email) = parse_message(raw) {
+            messages.push(email);
+            max_uid_seen = Some(max_uid_seen.map_or(uid, |prev| prev.max(uid)));
+        }
+    }
 
-            let body = if m.html_body_count() > 0 {
-                let mut html = String::new();
-                for i in 0..m.html_body_count() {
-                    if let Some(part) = m.body_html(i) {
-                        html.push_str(&part);
-                    }
-                }
-                htmd::HtmlToMarkdown::builder()
-                    .skip_tags(vec!["style", "script"])
-                    .build()
-                    .convert(&html)
-                    .unwrap_or(html)
-            } else {
-                let mut text = String::new();
-                for i in 0..m.text_body_count() {
-                    if let Some(part) = m.body_text(i) {
-                        let trimmed = part.trim();
-                        if !trimmed.is_empty() {
-                            text.push_str(trimmed);
-                        }
-                    }
-                }
-                text
-            };
-
-            Some(EmailMessage {
-                message_id,
-                from,
-                timestamp,
-                subject,
-                body,
-            })
-        })
-        .collect();
+    // Sort messages in descending order by date.
+    messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     // Close session.
     guard.logout().await;
 
-    Ok(messages)
+    // Build new cursor.
+    let new_cursor = match (server_uid_validity, max_uid_seen) {
+        (Some(uid_validity), Some(max_uid)) => {
+            let c = ImapCursor {
+                uid_validity,
+                max_uid,
+            };
+            Some(serde_json::to_string(&c).expect("ImapCursor serialization cannot fail"))
+        }
+        _ => cursor.map(|c| c.to_string()),
+    };
+
+    Ok(ReadResult {
+        items: messages,
+        cursor: new_cursor,
+    })
+}
+
+/// Parses a single IMAP fetch result into an `EmailMessage`, or `None`
+/// if the message lacks required fields (body, Message-ID).
+fn parse_message(raw: &async_imap::types::Fetch) -> Option<EmailMessage> {
+    let body = match raw.body() {
+        Some(b) => b,
+        None => {
+            warn!("skipping message with no body");
+            return None;
+        }
+    };
+    let parsed = match MessageParser::default().parse(body) {
+        Some(m) => m.into_owned(),
+        None => {
+            warn!("skipping unparseable message");
+            return None;
+        }
+    };
+
+    let message_id = parsed.message_id().unwrap_or_default().to_owned();
+    if message_id.is_empty() {
+        warn!("skipping message with no Message-ID");
+        return None;
+    }
+
+    let from = parsed
+        .from()
+        .and_then(|a| a.first())
+        .and_then(|a| a.address())
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    let timestamp = parsed.date().map(|d| d.to_timestamp()).unwrap_or(0);
+    let subject = parsed.subject().unwrap_or_default().to_owned();
+
+    let body = if parsed.html_body_count() > 0 {
+        let mut html = String::new();
+        for i in 0..parsed.html_body_count() {
+            if let Some(part) = parsed.body_html(i) {
+                html.push_str(&part);
+            }
+        }
+        htmd::HtmlToMarkdown::builder()
+            .skip_tags(vec!["style", "script"])
+            .build()
+            .convert(&html)
+            .unwrap_or(html)
+    } else {
+        let mut text = String::new();
+        for i in 0..parsed.text_body_count() {
+            if let Some(part) = parsed.body_text(i) {
+                let trimmed = part.trim();
+                if !trimmed.is_empty() {
+                    text.push_str(trimmed);
+                }
+            }
+        }
+        text
+    };
+
+    Some(EmailMessage {
+        message_id,
+        from,
+        timestamp,
+        subject,
+        body,
+    })
 }
 
 impl ToMarkdown for EmailMessage {
@@ -306,6 +367,27 @@ impl ToMarkdown for EmailMessage {
     }
 }
 
+impl SourceItem for EmailMessage {
+    fn id(&self) -> &str {
+        &self.message_id
+    }
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    fn author(&self) -> &str {
+        &self.from
+    }
+}
+
+/// Opaque cursor for incremental IMAP fetching.
+/// Encodes the mailbox's UIDVALIDITY and the highest UID we've seen,
+/// so the next fetch can start from `max_uid + 1`.
+#[derive(Serialize, Deserialize)]
+struct ImapCursor {
+    uid_validity: u32,
+    max_uid: u32,
+}
+
 #[derive(Deserialize)]
 pub struct ImapConfig {
     /// IMAP server hostname.
@@ -319,9 +401,6 @@ pub struct ImapConfig {
     /// Mailbox to select, e.g. `"INBOX"`, `"[Gmail]/All Mail"`.
     /// Defaults to `"INBOX"` when `None`.
     pub mailbox: Option<String>,
-    /// IMAP sequence set to fetch, e.g. `"1:*"`, `"1:50"`.
-    /// Defaults to `"1:*"` when `None`.
-    pub sequence: Option<String>,
     /// Use STARTTLS upgrade instead of implicit TLS.
     /// Defaults to `false` (implicit TLS on port 993).
     #[serde(default)]

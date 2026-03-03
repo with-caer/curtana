@@ -28,6 +28,10 @@ pub struct TaxonomyEntry {
     pub last_ingested_at: Option<u64>,
     /// Unix timestamp of the last description generation.
     pub description_updated_at: Option<u64>,
+    /// Opaque cursor for incremental source fetching.
+    /// Format is source-specific (e.g. JSON-encoded IMAP UID state).
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// Errors that can occur when loading or saving a manifest.
@@ -110,6 +114,7 @@ mod tests {
                 source_username: "user@example.com".to_string(),
                 last_ingested_at: Some(1700000000),
                 description_updated_at: Some(1700000000),
+                cursor: Some(r#"{"uid_validity":42,"max_uid":100}"#.to_string()),
             },
         );
 

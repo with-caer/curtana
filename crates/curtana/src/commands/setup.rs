@@ -25,9 +25,8 @@ const DEFAULT_CONFIG_CONTENT: &str = r#"# Curtana configuration
 # port = 993
 # username = "you@example.com"
 # password = "app-password"
-## Change these to use different mailboxes or message ranges
+## Change this to use a different mailbox
 # mailbox = "INBOX"
-# sequence = "1:*"
 ## Uncomment these for local IMAP servers.
 # accept_invalid_certs = true
 # starttls = true
