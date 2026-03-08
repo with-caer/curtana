@@ -154,6 +154,18 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
                 router::generate_description(&store, taxonomy_name, &mut models.chat, 10).await;
             entry.description = description;
             entry.description_updated_at = Some(now);
+
+            // Pre-embed the description for taxonomy affinity scoring.
+            if !entry.description.is_empty() {
+                match models.embed.embed(&[entry.description.as_str()]) {
+                    Ok(mut embeddings) => entry.description_embedding = embeddings.pop(),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to embed description for {taxonomy_name}: {e:?}"
+                        );
+                    }
+                }
+            }
         }
 
         let artifact_word = if count == 1 { "artifact" } else { "artifacts" };

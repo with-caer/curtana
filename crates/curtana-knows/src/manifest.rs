@@ -32,6 +32,10 @@ pub struct TaxonomyEntry {
     /// Format is source-specific (e.g. JSON-encoded IMAP UID state).
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Pre-computed embedding of the description, used for taxonomy affinity.
+    /// Populated during `/read` after description generation. `None` until then.
+    #[serde(default)]
+    pub description_embedding: Option<Vec<f32>>,
 }
 
 /// Errors that can occur when loading or saving a manifest.
@@ -143,6 +147,7 @@ mod tests {
                 last_ingested_at: Some(1700000000),
                 description_updated_at: Some(1700000000),
                 cursor: Some(r#"{"uid_validity":42,"max_uid":100}"#.to_string()),
+                description_embedding: None,
             },
         );
 
@@ -176,6 +181,7 @@ mod tests {
             last_ingested_at: None,
             description_updated_at: None,
             cursor: None,
+            description_embedding: None,
         };
         assert_eq!(entry.source_key(), "imap-imap-gmail-com-user-gmail-com");
     }
@@ -192,6 +198,7 @@ mod tests {
             last_ingested_at: None,
             description_updated_at: None,
             cursor: None,
+            description_embedding: None,
         };
         assert_eq!(entry.source_key(), "imap-mail-example-com-u-e");
     }

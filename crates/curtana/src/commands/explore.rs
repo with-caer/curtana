@@ -161,6 +161,7 @@ pub(crate) fn select(
                 last_ingested_at: None,
                 description_updated_at: None,
                 cursor: None,
+                description_embedding: None,
             },
         );
         added.push(taxonomy_name);
