@@ -2,6 +2,7 @@ extern crate alloc;
 
 pub mod manifest;
 pub mod router;
+pub(crate) mod search;
 pub mod tools;
 
 use std::{fmt, path::Path, sync::Arc};
@@ -64,8 +65,24 @@ impl Store {
                         data BLOB NOT NULL,
                         timestamp BIGINT,
                         author VARCHAR,
+                        contents VARCHAR DEFAULT '',
+                        fts_key VARCHAR DEFAULT '',
                         PRIMARY KEY (taxonomy, id)
                     );",
+                    [],
+                )
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+            // Migration for existing stores: add FTS columns if missing.
+            connection
+                .execute(
+                    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS contents VARCHAR DEFAULT '';",
+                    [],
+                )
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
+            connection
+                .execute(
+                    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS fts_key VARCHAR DEFAULT '';",
                     [],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
@@ -98,6 +115,8 @@ impl Store {
         let id = format!("{}", artifact.id);
         let timestamp = artifact.timestamp as i64;
         let author = format!("{}", artifact.author);
+        let contents_text = format!("{}", artifact.contents);
+        let fts_key = format!("{taxonomy}/{id}");
 
         let mut data_bytes = vec![];
         data_bytes
@@ -118,8 +137,8 @@ impl Store {
 
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO artifacts (taxonomy, id, data, timestamp, author) VALUES (?, ?, ?, ?, ?)",
-                    params![taxonomy.as_str(), id.as_str(), data_bytes, timestamp, author.as_str()],
+                    "INSERT OR REPLACE INTO artifacts (taxonomy, id, data, timestamp, author, contents, fts_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![taxonomy.as_str(), id.as_str(), data_bytes, timestamp, author.as_str(), contents_text.as_str(), fts_key.as_str()],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
@@ -285,12 +304,8 @@ impl Store {
     /// Finds the `top_k` artifacts most similar to `query` in the datastore.
     ///
     /// Uses a two-phase approach:
-    /// 1. DuckDB-native `list_cosine_similarity` to score and pick top-k IDs
+    /// 1. Score via vector similarity + BM25, fused with RRF
     /// 2. Load full artifact data only for the top-k
-    ///
-    /// When `recency_weight` is in `(0.0, 1.0]`, the score blends cosine
-    /// similarity with an exponential time-decay signal:
-    ///   score = (1 - rw) * cosine + rw * exp(-age_days * ln2 / 14)
     pub async fn search(
         &self,
         taxonomy: &str,
@@ -307,66 +322,29 @@ impl Store {
             .pop()
             .ok_or_else(|| Error::EmbeddingError("no embedding returned".into()))?;
 
-        // Phase 1: Score embeddings entirely in DuckDB.
+        // Phase 1: Score + fuse via search module.
         let this = self.clone();
         let taxonomy = taxonomy.to_string();
         let taxonomy_phase2 = taxonomy.clone();
         let query_literal = embedding_to_sql_literal(&query_embedding);
-        let rw = recency_weight.clamp(0.0, 1.0);
+        let query_text = query.to_string();
         let scored_ids: Vec<(String, f32)> =
             tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
                 let connection = this.connection.blocking_lock();
-
-                let sql = if rw > 0.0 {
-                    let decay = f64::ln(2.0) / RECENCY_HALF_LIFE_DAYS;
-                    format!(
-                        "SELECT e.artifact_id, \
-                            (1.0 - {rw}) * MAX(list_cosine_similarity(e.embedding, {query_literal})) \
-                            + {rw} * exp(-(CAST(? AS DOUBLE) - COALESCE(a.timestamp, 0)) / 86400.0 * {decay}) \
-                            AS score \
-                         FROM artifact_embeddings e \
-                         JOIN artifacts a ON a.taxonomy = e.taxonomy AND a.id = e.artifact_id \
-                         WHERE e.taxonomy = ? \
-                         GROUP BY e.artifact_id, a.timestamp \
-                         HAVING score > 0.0 \
-                         ORDER BY score DESC \
-                         LIMIT ?",
-                    )
-                } else {
-                    format!(
-                        "SELECT e.artifact_id, \
-                            MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
-                         FROM artifact_embeddings e \
-                         WHERE e.taxonomy = ? \
-                         GROUP BY e.artifact_id \
-                         HAVING score > 0.0 \
-                         ORDER BY score DESC \
-                         LIMIT ?",
-                    )
-                };
-                let mut statement = connection
-                    .prepare(&sql)
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
-                let extract = |row: &duckdb::Row<'_>| -> duckdb::Result<(String, f32)> {
-                    let id: String = row.get(0)?;
-                    let score: f64 = row.get(1)?;
-                    Ok((id, score as f32))
-                };
-                let results: Vec<(String, f32)> = if rw > 0.0 {
-                    statement
-                        .query_map(params![now as i64, taxonomy.as_str(), top_k as i64], extract)
-                        .map_err(|e| Error::DatabaseError(e.to_string()))?
-                        .flatten()
-                        .collect()
-                } else {
-                    statement
-                        .query_map(params![taxonomy.as_str(), top_k as i64], extract)
-                        .map_err(|e| Error::DatabaseError(e.to_string()))?
-                        .flatten()
-                        .collect()
-                };
-
-                Ok(results)
+                let fetch_limit = top_k * 3;
+                let vector = search::vector_score(
+                    &connection,
+                    &taxonomy,
+                    &query_literal,
+                    recency_weight,
+                    now,
+                    fetch_limit,
+                )?;
+                let bm25 = search::bm25_score(&connection, &taxonomy, &query_text, fetch_limit)?;
+                Ok(search::rrf_fuse(&vector, &bm25)
+                    .into_iter()
+                    .take(top_k)
+                    .collect())
             })
             .await
             .map_err(|e| Error::SpawnError(e.to_string()))??;
@@ -434,15 +412,16 @@ impl Store {
     }
 
     /// Returns scored artifacts for MMR re-ranking across multiple taxonomies.
-    /// Scores embeddings in DuckDB, then loads full artifact data for the top
-    /// candidates (needed for MMR inter-similarity computation via
-    /// `Artifact.embedding`).
+    /// Scores via vector similarity + BM25, fused with RRF, then loads full
+    /// artifact data for the top candidates (needed for MMR inter-similarity
+    /// computation via `Artifact.embedding`).
     ///
     /// Returns `(taxonomy, id, score, artifact)` tuples.
     pub async fn search_candidates(
         &self,
         taxonomies: &[String],
         query_embedding: &[f32],
+        query_text: &str,
         candidate_limit: usize,
         recency_weight: f32,
         now: u64,
@@ -450,74 +429,30 @@ impl Store {
         let this = self.clone();
         let query_literal = embedding_to_sql_literal(query_embedding);
         let taxonomies_owned: Vec<String> = taxonomies.to_vec();
-        let rw = recency_weight.clamp(0.0, 1.0);
+        let query_text_owned = query_text.to_string();
 
-        // Phase 1: Score embeddings entirely in DuckDB.
-        let scored_ids: Vec<(String, String, f32)> = tokio::task::spawn_blocking(
-            move || -> Result<Vec<(String, String, f32)>, Error> {
+        // Phase 1: Score via vector + BM25, fuse with RRF.
+        let scored_ids: Vec<(String, String, f32)> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, String, f32)>, Error> {
                 let connection = this.connection.blocking_lock();
-
-                let placeholders: String = taxonomies_owned
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = if rw > 0.0 {
-                    let decay = f64::ln(2.0) / RECENCY_HALF_LIFE_DAYS;
-                    format!(
-                        "SELECT e.taxonomy, e.artifact_id, \
-                            (1.0 - {rw}) * MAX(list_cosine_similarity(e.embedding, {query_literal})) \
-                            + {rw} * exp(-(CAST(? AS DOUBLE) - COALESCE(a.timestamp, 0)) / 86400.0 * {decay}) \
-                            AS score \
-                         FROM artifact_embeddings e \
-                         JOIN artifacts a ON a.taxonomy = e.taxonomy AND a.id = e.artifact_id \
-                         WHERE e.taxonomy IN ({placeholders}) \
-                         GROUP BY e.taxonomy, e.artifact_id, a.timestamp \
-                         HAVING score > 0.0 \
-                         ORDER BY score DESC \
-                         LIMIT ?",
-                    )
-                } else {
-                    format!(
-                        "SELECT e.taxonomy, e.artifact_id, \
-                            MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
-                         FROM artifact_embeddings e \
-                         WHERE e.taxonomy IN ({placeholders}) \
-                         GROUP BY e.taxonomy, e.artifact_id \
-                         HAVING score > 0.0 \
-                         ORDER BY score DESC \
-                         LIMIT ?",
-                    )
-                };
-                let mut statement = connection
-                    .prepare(&sql)
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-                let mut params_vec: Vec<Box<dyn duckdb::types::ToSql>> = Vec::new();
-                if rw > 0.0 {
-                    params_vec.push(Box::new(now as i64));
-                }
-                for t in &taxonomies_owned {
-                    params_vec.push(Box::new(t.clone()));
-                }
-                params_vec.push(Box::new(candidate_limit as i64));
-                let param_refs: Vec<&dyn duckdb::types::ToSql> =
-                    params_vec.iter().map(|b| b.as_ref()).collect();
-
-                let rows = statement
-                    .query_map(param_refs.as_slice(), |row| {
-                        let taxonomy: String = row.get(0)?;
-                        let id: String = row.get(1)?;
-                        let score: f64 = row.get(2)?;
-                        Ok((taxonomy, id, score as f32))
-                    })
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-                Ok(rows.flatten().collect())
-            },
-        )
-        .await
-        .map_err(|e| Error::SpawnError(e.to_string()))??;
+                let vector = search::vector_score_multi(
+                    &connection,
+                    &taxonomies_owned,
+                    &query_literal,
+                    recency_weight,
+                    now,
+                    candidate_limit,
+                )?;
+                let bm25 = search::bm25_score_multi(
+                    &connection,
+                    &taxonomies_owned,
+                    &query_text_owned,
+                    candidate_limit,
+                )?;
+                Ok(search::rrf_fuse_multi(&vector, &bm25))
+            })
+            .await
+            .map_err(|e| Error::SpawnError(e.to_string()))??;
 
         if scored_ids.is_empty() {
             return Ok(vec![]);
@@ -729,11 +664,18 @@ impl Store {
         .await
         .map_err(|e| Error::SpawnError(e.to_string()))?
     }
-}
 
-/// Half-life in days for the recency exponential decay.
-/// After 14 days, a recency signal of 1.0 decays to 0.5.
-const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
+    /// Rebuilds the DuckDB FTS index on the `artifacts` table.
+    pub async fn rebuild_fts_index(&self) -> Result<(), Error> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = this.connection.blocking_lock();
+            search::rebuild_fts_index(&conn)
+        })
+        .await
+        .map_err(|e| Error::SpawnError(e.to_string()))?
+    }
+}
 
 /// Maximum recursion depth for embedding chunking.
 const MAX_CHUNK_DEPTH: usize = 8;
@@ -1028,15 +970,15 @@ mod tests {
         let query = [1.0_f32, 0.0, 0.0];
         let taxonomies = vec![TEST_TAX.to_string()];
         let results = store
-            .search_candidates(&taxonomies, &query, 10, 0.0, 0)
+            .search_candidates(&taxonomies, &query, "", 10, 0.0, 0)
             .await
             .unwrap();
 
-        // "close" should rank first (cosine similarity 1.0).
+        // "close" should rank first (highest RRF score from vector ranking).
         assert!(!results.is_empty());
         assert_eq!(results[0].0, TEST_TAX);
         assert_eq!(results[0].1, "close");
-        assert!((results[0].2 - 1.0).abs() < 1e-5);
+        assert!(results[0].2 > 0.0);
 
         // "far" should also appear (cosine similarity 0.0 is not > 0,
         // so it may be excluded by the HAVING clause). If present, it
@@ -1070,15 +1012,15 @@ mod tests {
         let query = [1.0_f32, 0.0, 0.0];
         let taxonomies = vec![TEST_TAX.to_string()];
         let results = store
-            .search_candidates(&taxonomies, &query, 10, 0.0, 0)
+            .search_candidates(&taxonomies, &query, "", 10, 0.0, 0)
             .await
             .unwrap();
 
-        // Should appear with the best chunk's score (~1.0), not the worst.
+        // Should appear (multi-chunk artifact found via best chunk).
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, TEST_TAX);
         assert_eq!(results[0].1, "multi");
-        assert!((results[0].2 - 1.0).abs() < 1e-5);
+        assert!(results[0].2 > 0.0);
     }
 
     #[tokio::test]
@@ -1103,17 +1045,17 @@ mod tests {
 
         // Query in +x should no longer match well.
         let results_x = store
-            .search_candidates(&taxonomies, &[1.0, 0.0, 0.0], 10, 0.0, 0)
+            .search_candidates(&taxonomies, &[1.0, 0.0, 0.0], "", 10, 0.0, 0)
             .await
             .unwrap();
         // Query in +y should match.
         let results_y = store
-            .search_candidates(&taxonomies, &[0.0, 1.0, 0.0], 10, 0.0, 0)
+            .search_candidates(&taxonomies, &[0.0, 1.0, 0.0], "", 10, 0.0, 0)
             .await
             .unwrap();
 
         assert_eq!(results_y.len(), 1);
-        assert!((results_y[0].2 - 1.0).abs() < 1e-5);
+        assert!(results_y[0].2 > 0.0);
 
         // +x query: cosine similarity is 0.0, filtered out by HAVING > 0.
         assert!(results_x.is_empty());
@@ -1206,27 +1148,71 @@ mod tests {
         let query = [1.0_f32, 0.0, 0.0];
         let taxonomies = vec![TEST_TAX.to_string()];
 
-        // With recency_weight = 0, both should score identically (same embedding).
+        // With recency_weight = 0, both should appear (same embedding).
         let results_no_recency = store
-            .search_candidates(&taxonomies, &query, 10, 0.0, now)
+            .search_candidates(&taxonomies, &query, "", 10, 0.0, now)
             .await
             .unwrap();
         assert_eq!(results_no_recency.len(), 2);
-        assert!(
-            (results_no_recency[0].2 - results_no_recency[1].2).abs() < 1e-5,
-            "without recency, scores should be equal"
-        );
 
-        // With recency_weight = 0.8, the recent artifact should score higher.
+        // With recency_weight = 0.8, the recent artifact should rank first
+        // in the underlying vector scores (which feed into RRF).
         let results_with_recency = store
-            .search_candidates(&taxonomies, &query, 10, 0.8, now)
+            .search_candidates(&taxonomies, &query, "", 10, 0.8, now)
             .await
             .unwrap();
         assert_eq!(results_with_recency.len(), 2);
-        assert_eq!(results_with_recency[0].1, "recent");
+        assert_eq!(
+            results_with_recency[0].1, "recent",
+            "recent artifact should rank first with recency_weight=0.8"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_fts_index_and_bm25_score() {
+        let store = Store::new(None).await.unwrap();
+
+        let artifact = Artifact {
+            id: "doc1".into(),
+            timestamp: 1700000000,
+            author: "alice".into(),
+            contents: "the quick brown fox jumps over the lazy dog".into(),
+            embedding: vec![],
+        };
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
+
+        // Rebuild FTS index.
+        store.rebuild_fts_index().await.unwrap();
+
+        // BM25 should find the artifact by keyword.
+        let conn = store.connection.lock().await;
+        let results = search::bm25_score(&conn, TEST_TAX, "quick brown fox", 10).unwrap();
         assert!(
-            results_with_recency[0].2 > results_with_recency[1].2,
-            "recent artifact should score higher with recency_weight=0.8"
+            !results.is_empty(),
+            "BM25 should find artifact after FTS rebuild"
+        );
+        assert_eq!(results[0].0, "doc1");
+    }
+
+    #[tokio::test]
+    async fn bm25_returns_empty_without_fts_index() {
+        let store = Store::new(None).await.unwrap();
+
+        let artifact = Artifact {
+            id: "doc1".into(),
+            timestamp: 1700000000,
+            author: "alice".into(),
+            contents: "hello world".into(),
+            embedding: vec![],
+        };
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
+
+        // Without rebuild_fts_index, BM25 should gracefully return empty.
+        let conn = store.connection.lock().await;
+        let results = search::bm25_score(&conn, TEST_TAX, "hello", 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "BM25 should return empty without FTS index"
         );
     }
 }

@@ -129,6 +129,11 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
             continue;
         }
 
+        // Rebuild FTS index for BM25 search (non-fatal on failure).
+        if let Err(e) = store.rebuild_fts_index().await {
+            eprintln!("warning: failed to rebuild FTS index: {e}");
+        }
+
         // Update ingestion timestamp and cursor.
         if let Some(entry) = manifest.taxonomies.get_mut(taxonomy_name) {
             entry.last_ingested_at = Some(now);

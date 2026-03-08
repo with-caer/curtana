@@ -146,6 +146,7 @@ impl Router {
                 .search_candidates(
                     group_taxonomies,
                     &query_embedding,
+                    query,
                     candidate_limit,
                     recency_weight,
                     now,
