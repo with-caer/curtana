@@ -162,7 +162,6 @@ impl ToolExecutor {
         }
 
         let mut result = match call.name.as_str() {
-            "list_taxonomies" => self.list_taxonomies().await,
             "count" => self.tool_count(&call.args).await,
             "search" => self.tool_search(embed_model, &call.args).await,
             "browse" => self.tool_browse(&call.args).await,
@@ -180,50 +179,6 @@ impl ToolExecutor {
         }
 
         result
-    }
-
-    async fn list_taxonomies(&self) -> ToolResult {
-        use std::collections::BTreeMap;
-
-        // Group taxonomies by source_key to open one store per source.
-        let mut groups: BTreeMap<String, Vec<(&String, &crate::manifest::TaxonomyEntry)>> =
-            BTreeMap::new();
-        for (name, entry) in &self.manifest.taxonomies {
-            groups
-                .entry(entry.source_key())
-                .or_default()
-                .push((name, entry));
-        }
-
-        let mut lines = Vec::new();
-        for (source_key, taxonomies) in &groups {
-            let store = match open_source_store(&self.data_dir, source_key).await {
-                Ok(s) => s,
-                Err(e) => {
-                    for (name, _) in taxonomies {
-                        lines.push(format!("{name}: error ({e})"));
-                    }
-                    continue;
-                }
-            };
-            for (name, entry) in taxonomies {
-                let count = store.count(name).await.unwrap_or(0);
-                let desc = if entry.description.is_empty() {
-                    "(no description)"
-                } else {
-                    &entry.description
-                };
-                lines.push(format!("{name}: {desc} ({count} items)"));
-            }
-        }
-        ToolResult {
-            text: if lines.is_empty() {
-                "No taxonomies available.".to_string()
-            } else {
-                lines.join("\n")
-            },
-            sources: vec![],
-        }
     }
 
     async fn tool_count(&self, args: &serde_json::Value) -> ToolResult {
@@ -427,12 +382,12 @@ fn format_artifacts(results: &[ScoredArtifact]) -> String {
     if results.is_empty() {
         return "No results found.".to_string();
     }
-    results
-        .iter()
-        .enumerate()
-        .map(|(i, r)| format_single_artifact(i + 1, &r.artifact, &r.taxonomy))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = format!("Found {} result(s):\n", results.len());
+    for (i, r) in results.iter().enumerate() {
+        out.push_str(&format_single_artifact(i + 1, &r.artifact, &r.taxonomy));
+        out.push('\n');
+    }
+    out
 }
 
 /// Formats a single artifact as a compact entry for the LLM context.
@@ -467,10 +422,10 @@ mod tests {
 
     #[test]
     fn parse_tool_call_no_args() {
-        let output = "<tool>list_taxonomies()</tool>";
+        let output = "<tool>some_tool()</tool>";
         match parse_tool_response(output) {
             ParseResult::ToolCall(call) => {
-                assert_eq!(call.name, "list_taxonomies");
+                assert_eq!(call.name, "some_tool");
                 assert!(call.args.is_object());
                 assert!(call.args.as_object().unwrap().is_empty());
             }

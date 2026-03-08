@@ -30,12 +30,12 @@ pub fn handle_event(app: &mut App, event: Event, cmd_tx: &mpsc::UnboundedSender<
         }
         Event::Token(token) => {
             if !app.activity_lines.is_empty() {
-                app.clear_activity();
+                app.flush_activity_to_message();
             }
             app.append_to_last_message(&token);
         }
         Event::CommandDone(result) => {
-            app.clear_activity();
+            app.flush_activity_to_message();
             handle_command_done(app, result);
         }
         Event::Error(err) => {

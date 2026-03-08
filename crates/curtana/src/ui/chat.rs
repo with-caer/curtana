@@ -31,12 +31,17 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             Role::Assistant | Role::System => {
                 // 2-space indent to align with user "> " prefix.
                 let indent = Span::raw("  ");
+                let dim = Style::default().fg(Color::DarkGray);
+
+                // Render persisted activity lines (from gathering phase).
+                for activity in &message.activity {
+                    lines.push(Line::from(Span::styled(format!("  {activity}"), dim)));
+                }
+
+                // Render live activity lines (still gathering).
                 if message.content.is_empty() {
-                    if !app.activity_lines.is_empty() {
-                        let dim = Style::default().fg(Color::DarkGray);
-                        for activity in &app.activity_lines {
-                            lines.push(Line::from(Span::styled(format!("  {activity}"), dim)));
-                        }
+                    for activity in &app.activity_lines {
+                        lines.push(Line::from(Span::styled(format!("  {activity}"), dim)));
                     }
                     // Streaming placeholder cursor.
                     lines.push(Line::from(vec![

@@ -40,6 +40,8 @@ pub enum AppStatus {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Activity trace lines from the gathering phase (shown dimmed above content).
+    pub activity: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,6 +56,7 @@ impl Message {
         Self {
             role: Role::User,
             content,
+            activity: Vec::new(),
         }
     }
 
@@ -61,6 +64,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            activity: Vec::new(),
         }
     }
 
@@ -68,6 +72,7 @@ impl Message {
         Self {
             role: Role::System,
             content,
+            activity: Vec::new(),
         }
     }
 }
@@ -211,5 +216,18 @@ impl App {
 
     pub fn clear_activity(&mut self) {
         self.activity_lines.clear();
+    }
+
+    /// Moves activity lines into the last message so they persist
+    /// after synthesis begins, then clears the activity buffer.
+    pub fn flush_activity_to_message(&mut self) {
+        if self.activity_lines.is_empty() {
+            return;
+        }
+        if let Some(msg) = self.messages.last_mut() {
+            msg.activity.append(&mut self.activity_lines);
+        } else {
+            self.activity_lines.clear();
+        }
     }
 }
