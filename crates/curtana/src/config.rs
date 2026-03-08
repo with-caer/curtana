@@ -16,9 +16,6 @@ pub struct Config {
     pub chat_model: Option<String>,
     /// Path to a text embedding model GGUF file.
     pub embed_model: Option<String>,
-    /// Enable agent mode for queries (tool-use loop).
-    /// Defaults to `true`.
-    pub agent_mode: Option<bool>,
 
     /// Path to the config file that was loaded (not serialized).
     #[serde(skip)]
@@ -81,10 +78,6 @@ impl Config {
                 .join("models")
                 .join(setup::DEFAULT_EMBED_MODEL_FILENAME)
         }
-    }
-
-    pub fn use_agent_mode(&self) -> bool {
-        self.agent_mode.unwrap_or(true)
     }
 }
 

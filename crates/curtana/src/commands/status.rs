@@ -26,8 +26,20 @@ pub fn run(config: &Config, tx: &mpsc::UnboundedSender<Event>) {
         return;
     }
 
-    let entries: Vec<(String, _)> = manifest.taxonomies.into_iter().collect();
+    let mut text = String::from("## Tracked taxonomies\n\n");
+    for (name, entry) in &manifest.taxonomies {
+        let short_desc = entry
+            .description
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        if short_desc.is_empty() {
+            text.push_str(&format!("- **{name}**\n"));
+        } else {
+            text.push_str(&format!("- **{name}** \u{2014} {short_desc}\n"));
+        }
+    }
 
-    tx.send(Event::CommandDone(CommandResult::Status { entries }))
+    tx.send(Event::CommandDone(CommandResult::Message(text)))
         .ok();
 }

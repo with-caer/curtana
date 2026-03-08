@@ -280,18 +280,37 @@ impl ToolExecutor {
                 Ok(s) => s,
                 Err(e) => return err_result(e),
             };
-            let artifacts = match store
-                .search(taxonomy, embed_model, query, top_k, recency_weight, now)
+            let taxonomies = vec![taxonomy.to_string()];
+            let query_embedding = match embed_model.embed(&[query]) {
+                Ok(mut e) => match e.pop() {
+                    Some(emb) => emb,
+                    None => {
+                        return err_result(crate::Error::EmbeddingError(
+                            "no embedding returned".into(),
+                        ));
+                    }
+                },
+                Err(e) => return err_result(crate::Error::EmbeddingError(format!("{e:?}"))),
+            };
+            let candidates = match store
+                .search_candidates(
+                    &taxonomies,
+                    &query_embedding,
+                    query,
+                    top_k,
+                    recency_weight,
+                    now,
+                )
                 .await
             {
-                Ok(a) => a,
+                Ok(c) => c,
                 Err(e) => return err_result(e),
             };
-            artifacts
+            candidates
                 .into_iter()
-                .map(|a| ScoredArtifact {
-                    taxonomy: taxonomy.to_string(),
-                    score: 0.0,
+                .map(|(t, _, s, a)| ScoredArtifact {
+                    taxonomy: t,
+                    score: s,
                     artifact: a,
                 })
                 .collect()

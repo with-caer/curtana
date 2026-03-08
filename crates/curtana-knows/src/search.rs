@@ -1,11 +1,7 @@
 use std::collections::HashMap;
 
-use duckdb::params;
-
 use crate::Error;
 
-/// (artifact_id, score)
-pub(crate) type ScoredId = (String, f32);
 /// (taxonomy, artifact_id, score)
 pub(crate) type ScoredTaxonomyId = (String, String, f32);
 
@@ -18,75 +14,8 @@ pub(crate) const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 const RRF_K: f32 = 60.0;
 
 // ---------------------------------------------------------------------------
-// Vector scoring (extracted from Store::search / search_candidates Phase 1)
+// Vector scoring
 // ---------------------------------------------------------------------------
-
-/// Scores artifacts in a single taxonomy by cosine similarity with optional
-/// recency blending. Returns `(id, score)` pairs sorted descending.
-pub(crate) fn vector_score(
-    conn: &duckdb::Connection,
-    taxonomy: &str,
-    query_literal: &str,
-    recency_weight: f32,
-    now: u64,
-    limit: usize,
-) -> Result<Vec<ScoredId>, Error> {
-    let rw = recency_weight.clamp(0.0, 1.0);
-
-    let sql = if rw > 0.0 {
-        let decay = f64::ln(2.0) / RECENCY_HALF_LIFE_DAYS;
-        format!(
-            "SELECT e.artifact_id, \
-                (1.0 - {rw}) * MAX(list_cosine_similarity(e.embedding, {query_literal})) \
-                + {rw} * exp(-(CAST(? AS DOUBLE) - COALESCE(a.timestamp, 0)) / 86400.0 * {decay}) \
-                AS score \
-             FROM artifact_embeddings e \
-             JOIN artifacts a ON a.taxonomy = e.taxonomy AND a.id = e.artifact_id \
-             WHERE e.taxonomy = ? \
-             GROUP BY e.artifact_id, a.timestamp \
-             HAVING score > 0.0 \
-             ORDER BY score DESC \
-             LIMIT ?",
-        )
-    } else {
-        format!(
-            "SELECT e.artifact_id, \
-                MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
-             FROM artifact_embeddings e \
-             WHERE e.taxonomy = ? \
-             GROUP BY e.artifact_id \
-             HAVING score > 0.0 \
-             ORDER BY score DESC \
-             LIMIT ?",
-        )
-    };
-
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-    let extract = |row: &duckdb::Row<'_>| -> duckdb::Result<ScoredId> {
-        let id: String = row.get(0)?;
-        let score: f64 = row.get(1)?;
-        Ok((id, score as f32))
-    };
-
-    let results: Vec<ScoredId> = if rw > 0.0 {
-        statement
-            .query_map(params![now as i64, taxonomy, limit as i64], extract)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?
-            .flatten()
-            .collect()
-    } else {
-        statement
-            .query_map(params![taxonomy, limit as i64], extract)
-            .map_err(|e| Error::DatabaseError(e.to_string()))?
-            .flatten()
-            .collect()
-    };
-
-    Ok(results)
-}
 
 /// Scores artifacts across multiple taxonomies by cosine similarity with
 /// optional recency blending. Returns `(taxonomy, id, score)` tuples sorted
@@ -158,44 +87,8 @@ pub(crate) fn vector_score_multi(
 }
 
 // ---------------------------------------------------------------------------
-// BM25 scoring (new)
+// BM25 scoring
 // ---------------------------------------------------------------------------
-
-/// Scores artifacts in a single taxonomy using DuckDB's FTS BM25 index.
-/// Returns empty if the FTS index hasn't been built yet (graceful degradation).
-pub(crate) fn bm25_score(
-    conn: &duckdb::Connection,
-    taxonomy: &str,
-    query_text: &str,
-    limit: usize,
-) -> Result<Vec<ScoredId>, Error> {
-    if !has_fts_index(conn) {
-        return Ok(vec![]);
-    }
-
-    let escaped = query_text.replace('\'', "''");
-    let sql = format!(
-        "SELECT a.id, fts_main_artifacts.match_bm25(a.fts_key, '{escaped}') AS score \
-         FROM artifacts a \
-         WHERE score IS NOT NULL AND a.taxonomy = ? \
-         ORDER BY score DESC \
-         LIMIT ?"
-    );
-
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-    let rows = statement
-        .query_map(params![taxonomy, limit as i64], |row| {
-            let id: String = row.get(0)?;
-            let score: f64 = row.get(1)?;
-            Ok((id, score as f32))
-        })
-        .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-    Ok(rows.flatten().collect())
-}
 
 /// Scores artifacts across multiple taxonomies using BM25.
 /// Returns empty if the FTS index hasn't been built yet.
@@ -259,21 +152,6 @@ fn has_fts_index(conn: &duckdb::Connection) -> bool {
 // Reciprocal Rank Fusion
 // ---------------------------------------------------------------------------
 
-/// Fuses vector and BM25 results using Reciprocal Rank Fusion.
-/// Documents appearing in both lists receive contributions from both ranks.
-pub(crate) fn rrf_fuse(vector_results: &[ScoredId], bm25_results: &[ScoredId]) -> Vec<ScoredId> {
-    let mut scores: HashMap<String, f32> = HashMap::new();
-    for (rank, (id, _)) in vector_results.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
-    }
-    for (rank, (id, _)) in bm25_results.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
-    }
-    let mut fused: Vec<ScoredId> = scores.into_iter().collect();
-    fused.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
-    fused
-}
-
 /// Fuses multi-taxonomy vector and BM25 results using RRF.
 /// Keys on `(taxonomy, id)` to avoid collisions across taxonomies.
 pub(crate) fn rrf_fuse_multi(
@@ -323,43 +201,6 @@ pub(crate) fn rebuild_fts_index(conn: &duckdb::Connection) -> Result<(), Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rrf_fuse_both_empty() {
-        let result = rrf_fuse(&[], &[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn rrf_fuse_vector_only() {
-        let vector = vec![
-            ("a".to_string(), 0.9),
-            ("b".to_string(), 0.8),
-            ("c".to_string(), 0.7),
-        ];
-        let result = rrf_fuse(&vector, &[]);
-        // Should preserve vector ranking order.
-        assert_eq!(result[0].0, "a");
-        assert_eq!(result[1].0, "b");
-        assert_eq!(result[2].0, "c");
-    }
-
-    #[test]
-    fn rrf_fuse_bm25_only() {
-        let bm25 = vec![("x".to_string(), 5.0), ("y".to_string(), 3.0)];
-        let result = rrf_fuse(&[], &bm25);
-        assert_eq!(result[0].0, "x");
-        assert_eq!(result[1].0, "y");
-    }
-
-    #[test]
-    fn rrf_fuse_overlap_ranks_highest() {
-        let vector = vec![("a".to_string(), 0.9), ("shared".to_string(), 0.8)];
-        let bm25 = vec![("b".to_string(), 5.0), ("shared".to_string(), 3.0)];
-        let result = rrf_fuse(&vector, &bm25);
-        // "shared" appears in both lists, so should rank highest.
-        assert_eq!(result[0].0, "shared");
-    }
 
     #[test]
     fn rrf_fuse_multi_keys_on_taxonomy_and_id() {

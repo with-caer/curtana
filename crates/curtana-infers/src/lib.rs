@@ -179,11 +179,6 @@ impl ChatModel {
         self.messages.truncate(1);
     }
 
-    /// Returns the number of messages in the conversation history.
-    pub fn history_len(&self) -> usize {
-        self.messages.len()
-    }
-
     /// Run inference against the model with `prompt`,
     /// writing the model's output to `output`.
     pub fn infer(&mut self, prompt: &str, output: &mut impl Write) -> Result<(), Error> {
@@ -429,75 +424,31 @@ pub enum Error {
     IoError(String),
 }
 
-impl From<LlamaCppError> for Error {
-    fn from(value: LlamaCppError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
+macro_rules! from_native {
+    ($($t:ty),+ $(,)?) => {
+        $(impl From<$t> for Error {
+            fn from(v: $t) -> Self { Self::InternalNativeError(v.to_string()) }
+        })+
+    };
 }
 
-impl From<LlamaModelLoadError> for Error {
-    fn from(value: LlamaModelLoadError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<ChatTemplateError> for Error {
-    fn from(value: ChatTemplateError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<ApplyChatTemplateError> for Error {
-    fn from(value: ApplyChatTemplateError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<NewLlamaChatMessageError> for Error {
-    fn from(value: NewLlamaChatMessageError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<LlamaContextLoadError> for Error {
-    fn from(value: LlamaContextLoadError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<BatchAddError> for Error {
-    fn from(value: BatchAddError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<StringToTokenError> for Error {
-    fn from(value: StringToTokenError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<TokenToStringError> for Error {
-    fn from(value: TokenToStringError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<DecodeError> for Error {
-    fn from(value: DecodeError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
-
-impl From<EmbeddingsError> for Error {
-    fn from(value: EmbeddingsError) -> Self {
-        Self::InternalNativeError(value.to_string())
-    }
-}
+from_native!(
+    LlamaCppError,
+    LlamaModelLoadError,
+    ChatTemplateError,
+    ApplyChatTemplateError,
+    NewLlamaChatMessageError,
+    LlamaContextLoadError,
+    BatchAddError,
+    StringToTokenError,
+    TokenToStringError,
+    DecodeError,
+    EmbeddingsError,
+);
 
 impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Self::IoError(value.to_string())
+    fn from(v: std::io::Error) -> Self {
+        Self::IoError(v.to_string())
     }
 }
 

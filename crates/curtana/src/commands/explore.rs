@@ -3,7 +3,7 @@ use curtana_reads::imap;
 use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
-use crate::event::{CommandResult, Event, ExploreFolder};
+use crate::event::{CommandResult, Event};
 
 /// State retained between the two explore phases.
 pub(crate) struct ExploreState {
@@ -36,7 +36,8 @@ pub(crate) async fn run(
     };
 
     let mut entries = Vec::new();
-    let mut folders = Vec::new();
+    // (index, folder_name, source_label, already_tracked)
+    let mut folder_rows: Vec<(usize, String, String, bool)> = Vec::new();
 
     for source in &config.source {
         match source {
@@ -60,13 +61,8 @@ pub(crate) async fn run(
                     });
 
                     let index = entries.len() + 1;
-                    folders.push(ExploreFolder {
-                        index,
-                        name: folder.name.clone(),
-                        source_host: imap_config.host.clone(),
-                        source_username: imap_config.username.clone(),
-                        already_tracked,
-                    });
+                    let label = format_source_label(&imap_config.username, &imap_config.host);
+                    folder_rows.push((index, folder.name.clone(), label, already_tracked));
                     entries.push(ExploreStateEntry {
                         folder_name: folder.name,
                         source_host: imap_config.host.clone(),
@@ -85,10 +81,29 @@ pub(crate) async fn run(
         return None;
     }
 
-    tx.send(Event::CommandDone(CommandResult::ExploreFolders {
-        folders,
-    }))
-    .ok();
+    // Format the folder listing, grouped by source label.
+    let mut text = String::from("## Available folders\n\n");
+    type FolderGroup<'a> = (String, Vec<(usize, &'a str, bool)>);
+    let mut groups: Vec<FolderGroup<'_>> = Vec::new();
+    for (index, name, label, tracked) in &folder_rows {
+        if let Some(group) = groups.iter_mut().find(|(l, _)| l == label) {
+            group.1.push((*index, name.as_str(), *tracked));
+        } else {
+            groups.push((label.clone(), vec![(*index, name.as_str(), *tracked)]));
+        }
+    }
+    for (label, group) in &groups {
+        text.push_str(&format!("### {label}\n\n"));
+        for &(index, name, tracked) in group {
+            let marker = if tracked { " *(already tracked)*" } else { "" };
+            text.push_str(&format!("- `[{index}]` {name}{marker}\n"));
+        }
+        text.push('\n');
+    }
+    text.push_str("Enter folder numbers (e.g. `1,3`) or `all`:");
+
+    tx.send(Event::CommandDone(CommandResult::ExploreReady(text)))
+        .ok();
 
     Some(ExploreState { entries })
 }
@@ -194,6 +209,19 @@ pub(crate) fn select(
 
     tx.send(Event::CommandDone(CommandResult::Message(msg)))
         .ok();
+}
+
+/// Human-readable source label for display, e.g. `user@host`.
+fn format_source_label(username: &str, host: &str) -> String {
+    if let Some(domain) = username.rsplit_once('@').map(|(_, d)| d) {
+        if domain == host {
+            username.to_string()
+        } else {
+            format!("{username} via {host}")
+        }
+    } else {
+        format!("{username}@{host}")
+    }
 }
 
 /// Converts a folder name into a safe taxonomy name component.

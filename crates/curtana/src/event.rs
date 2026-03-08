@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use crossterm::event::Event as CrosstermEvent;
-use curtana_knows::manifest::TaxonomyEntry;
 use tokio::sync::mpsc;
 
 /// Structured progress for a long-running operation (e.g. embedding).
@@ -35,23 +34,10 @@ pub enum Event {
 pub enum CommandResult {
     /// Query completed.
     QueryDone,
-    /// Status listing of taxonomies.
-    Status {
-        entries: Vec<(String, TaxonomyEntry)>,
-    },
-    /// Explore phase 1: folder list for user selection.
-    ExploreFolders { folders: Vec<ExploreFolder> },
+    /// Explore phase 1: formatted folder list, awaits user selection.
+    ExploreReady(String),
     /// A simple message response.
     Message(String),
-}
-
-/// A discovered folder shown to the user for selection.
-pub struct ExploreFolder {
-    pub index: usize,
-    pub name: String,
-    pub source_host: String,
-    pub source_username: String,
-    pub already_tracked: bool,
 }
 
 /// An `io::Write` implementation that sends tokens through a channel.

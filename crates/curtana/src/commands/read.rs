@@ -3,7 +3,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use curtana_knows::manifest::Manifest;
 use curtana_knows::{Artifact, open_source_store, router};
 use curtana_reads::imap;
-use curtana_reads::{SourceItem, ToMarkdown};
 use tokio::sync::mpsc;
 
 use crate::config::{Config, SourceConfig};
@@ -233,9 +232,9 @@ async fn fetch_artifacts(
                 .items
                 .into_iter()
                 .map(|item| Artifact {
-                    id: item.id().into(),
-                    timestamp: item.timestamp() as u64,
-                    author: item.author().into(),
+                    id: item.message_id.as_str().into(),
+                    timestamp: item.timestamp as u64,
+                    author: item.from.as_str().into(),
                     contents: item.to_markdown().into(),
                     embedding: Vec::new(),
                 })

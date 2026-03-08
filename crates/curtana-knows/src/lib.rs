@@ -7,10 +7,7 @@ pub mod tools;
 
 use std::{fmt, path::Path, sync::Arc};
 
-use codas::{
-    codec::{Decodable, ReadsDecodable, WritesEncodable},
-    types::Text,
-};
+use codas::codec::{ReadsDecodable, WritesEncodable};
 use curtana_infers::TextEmbeddingModel;
 use duckdb::params;
 use tokio::sync::Mutex;
@@ -166,37 +163,6 @@ impl Store {
         .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
-    pub async fn get(
-        &self,
-        taxonomy: &str,
-        id: Text,
-        data: &mut impl Decodable,
-    ) -> Result<(), Error> {
-        let this = self.clone();
-        let taxonomy = taxonomy.to_string();
-
-        let data_bytes: Vec<u8> = tokio::task::spawn_blocking(move || {
-            let connection = this.connection.blocking_lock();
-            connection
-                .query_row(
-                    "SELECT data FROM artifacts WHERE taxonomy = ? AND id = ?",
-                    params![taxonomy.as_str(), id.as_str()],
-                    |row| row.get(0),
-                )
-                .ok()
-        })
-        .await
-        .map_err(|e| Error::SpawnError(e.to_string()))?
-        .ok_or(Error::NotFound)?;
-
-        data_bytes
-            .as_slice()
-            .read_data_into(data)
-            .map_err(|e| Error::SerializationError(format!("{e:?}")))?;
-
-        Ok(())
-    }
-
     /// Embeds all artifacts currently stored in the datastore
     /// that don't already have embeddings. If the text exceeds
     /// the model's context window, it is split into chunks and
@@ -299,116 +265,6 @@ impl Store {
         })
         .await
         .map_err(|e| Error::SpawnError(e.to_string()))?
-    }
-
-    /// Finds the `top_k` artifacts most similar to `query` in the datastore.
-    ///
-    /// Uses a two-phase approach:
-    /// 1. Score via vector similarity + BM25, fused with RRF
-    /// 2. Load full artifact data only for the top-k
-    pub async fn search(
-        &self,
-        taxonomy: &str,
-        model: &mut TextEmbeddingModel,
-        query: &str,
-        top_k: usize,
-        recency_weight: f32,
-        now: u64,
-    ) -> Result<Vec<Artifact>, Error> {
-        // Embed the query.
-        let query_embedding = model
-            .embed(&[query])
-            .map_err(|e| Error::EmbeddingError(format!("{e:?}")))?
-            .pop()
-            .ok_or_else(|| Error::EmbeddingError("no embedding returned".into()))?;
-
-        // Phase 1: Score + fuse via search module.
-        let this = self.clone();
-        let taxonomy = taxonomy.to_string();
-        let taxonomy_phase2 = taxonomy.clone();
-        let query_literal = embedding_to_sql_literal(&query_embedding);
-        let query_text = query.to_string();
-        let scored_ids: Vec<(String, f32)> =
-            tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
-                let connection = this.connection.blocking_lock();
-                let fetch_limit = top_k * 3;
-                let vector = search::vector_score(
-                    &connection,
-                    &taxonomy,
-                    &query_literal,
-                    recency_weight,
-                    now,
-                    fetch_limit,
-                )?;
-                let bm25 = search::bm25_score(&connection, &taxonomy, &query_text, fetch_limit)?;
-                Ok(search::rrf_fuse(&vector, &bm25)
-                    .into_iter()
-                    .take(top_k)
-                    .collect())
-            })
-            .await
-            .map_err(|e| Error::SpawnError(e.to_string()))??;
-
-        if scored_ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Phase 2: Load full artifact data only for top-k IDs.
-        let taxonomy = taxonomy_phase2;
-        let ids: Vec<String> = scored_ids.iter().map(|(id, _)| id.clone()).collect();
-        let this = self.clone();
-        let mut artifacts: Vec<Artifact> =
-            tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
-                let connection = this.connection.blocking_lock();
-
-                let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!(
-                    "SELECT data FROM artifacts WHERE taxonomy = ? AND id IN ({placeholders})"
-                );
-                let mut statement = connection
-                    .prepare(&sql)
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-                let mut params_vec: Vec<Box<dyn duckdb::types::ToSql>> = Vec::new();
-                params_vec.push(Box::new(taxonomy));
-                for id in &ids {
-                    params_vec.push(Box::new(id.clone()));
-                }
-                let param_refs: Vec<&dyn duckdb::types::ToSql> =
-                    params_vec.iter().map(|b| b.as_ref()).collect();
-                let rows = statement
-                    .query_map(param_refs.as_slice(), |row| {
-                        let data: Vec<u8> = row.get(0)?;
-                        Ok(data)
-                    })
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-                Ok(rows
-                    .into_iter()
-                    .filter_map(|r| {
-                        let data = r.ok()?;
-                        data.as_slice().read_data().ok()
-                    })
-                    .collect())
-            })
-            .await
-            .map_err(|e| Error::SpawnError(e.to_string()))??;
-
-        // Re-sort by score (DB may return in different order).
-        let id_to_score: std::collections::HashMap<String, f32> = scored_ids.into_iter().collect();
-        artifacts.sort_by(|a, b| {
-            let sa = id_to_score
-                .get(format!("{}", a.id).as_str())
-                .copied()
-                .unwrap_or(0.0);
-            let sb = id_to_score
-                .get(format!("{}", b.id).as_str())
-                .copied()
-                .unwrap_or(0.0);
-            sa.total_cmp(&sb).reverse()
-        });
-
-        Ok(artifacts)
     }
 
     /// Returns scored artifacts for MMR re-ranking across multiple taxonomies.
@@ -808,7 +664,6 @@ pub async fn open_source_store(data_dir: &Path, source_key: &str) -> Result<Stor
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Error {
-    NotFound,
     DatabaseError(String),
     SerializationError(String),
     EmbeddingError(String),
@@ -818,7 +673,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NotFound => write!(f, "not found"),
             Error::DatabaseError(e) => write!(f, "database error: {e}"),
             Error::SerializationError(e) => write!(f, "serialization error: {e}"),
             Error::EmbeddingError(e) => write!(f, "embedding error: {e}"),
@@ -906,24 +760,14 @@ mod tests {
         };
 
         store.upsert(TEST_TAX, &artifact).await.unwrap();
+        assert_eq!(store.count(TEST_TAX).await.unwrap(), 1);
 
-        let mut found = Artifact {
-            id: Text::EMPTY,
-            timestamp: 0,
-            author: Text::EMPTY,
-            contents: Text::EMPTY,
-            embedding: vec![],
-        };
-        assert!(store.get(TEST_TAX, "abc".into(), &mut found).await.is_ok());
-        assert_eq!(format!("{}", found.contents), "hello, testy");
-        assert_eq!(found.timestamp, 1700000000);
-        assert_eq!(format!("{}", found.author), "tester");
-
-        let mut not_found = Text::EMPTY;
-        assert_eq!(
-            Err(Error::NotFound),
-            store.get(TEST_TAX, "xyz".into(), &mut not_found).await
-        );
+        let browsed = store
+            .browse(TEST_TAX, 0, 10, BrowseOrder::Desc)
+            .await
+            .unwrap();
+        assert_eq!(browsed.len(), 1);
+        assert_eq!(format!("{}", browsed[0].contents), "hello, testy");
     }
 
     #[test]
@@ -1186,12 +1030,14 @@ mod tests {
 
         // BM25 should find the artifact by keyword.
         let conn = store.connection.lock().await;
-        let results = search::bm25_score(&conn, TEST_TAX, "quick brown fox", 10).unwrap();
+        let results =
+            search::bm25_score_multi(&conn, &[TEST_TAX.to_string()], "quick brown fox", 10)
+                .unwrap();
         assert!(
             !results.is_empty(),
             "BM25 should find artifact after FTS rebuild"
         );
-        assert_eq!(results[0].0, "doc1");
+        assert_eq!(results[0].1, "doc1");
     }
 
     #[tokio::test]
@@ -1209,7 +1055,8 @@ mod tests {
 
         // Without rebuild_fts_index, BM25 should gracefully return empty.
         let conn = store.connection.lock().await;
-        let results = search::bm25_score(&conn, TEST_TAX, "hello", 10).unwrap();
+        let results =
+            search::bm25_score_multi(&conn, &[TEST_TAX.to_string()], "hello", 10).unwrap();
         assert!(
             results.is_empty(),
             "BM25 should return empty without FTS index"

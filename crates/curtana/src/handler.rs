@@ -181,52 +181,7 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
         CommandResult::QueryDone => {
             app.status = AppStatus::Idle;
         }
-        CommandResult::Status { entries } => {
-            app.status = AppStatus::Idle;
-            let mut text = String::from("## Tracked taxonomies\n\n");
-            for (name, entry) in &entries {
-                // Use only the first non-empty line to keep the list intact.
-                let short_desc = entry
-                    .description
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("");
-                if short_desc.is_empty() {
-                    text.push_str(&format!("- **{name}**\n"));
-                } else {
-                    text.push_str(&format!("- **{name}** \u{2014} {short_desc}\n"));
-                }
-            }
-            app.add_message(Message::system(text));
-        }
-        CommandResult::ExploreFolders { folders } => {
-            let mut text = String::from("## Available folders\n\n");
-
-            // Group folders by source, preserving order of first appearance.
-            let mut groups: Vec<(String, Vec<&crate::event::ExploreFolder>)> = Vec::new();
-            for f in &folders {
-                let label = format_source_label(&f.source_username, &f.source_host);
-                if let Some(group) = groups.iter_mut().find(|(l, _)| l == &label) {
-                    group.1.push(f);
-                } else {
-                    groups.push((label, vec![f]));
-                }
-            }
-
-            for (label, group_folders) in &groups {
-                text.push_str(&format!("### {label}\n\n"));
-                for f in group_folders {
-                    let marker = if f.already_tracked {
-                        " *(already tracked)*"
-                    } else {
-                        ""
-                    };
-                    text.push_str(&format!("- `[{}]` {}{}\n", f.index, f.name, marker));
-                }
-                text.push('\n');
-            }
-
-            text.push_str("Enter folder numbers (e.g. `1,3`) or `all`:");
+        CommandResult::ExploreReady(text) => {
             app.add_message(Message::system(text));
             app.status = AppStatus::AwaitingExploreSelection;
         }
@@ -234,22 +189,5 @@ fn handle_command_done(app: &mut App, result: CommandResult) {
             app.status = AppStatus::Idle;
             app.add_message(Message::system(msg));
         }
-    }
-}
-
-/// Formats a human-readable label for an IMAP source.
-///
-/// - `john` + `mail.example.com` → `john@mail.example.com`
-/// - `me@caer.cc` + `127.0.0.1` → `me@caer.cc via 127.0.0.1`
-/// - `me@gmail.com` + `gmail.com` → `me@gmail.com`
-fn format_source_label(username: &str, host: &str) -> String {
-    if let Some(domain) = username.rsplit_once('@').map(|(_, d)| d) {
-        if domain == host {
-            username.to_string()
-        } else {
-            format!("{username} via {host}")
-        }
-    } else {
-        format!("{username}@{host}")
     }
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tracing::warn;
 
-use crate::{ReadResult, SourceItem, ToMarkdown};
+use crate::ReadResult;
 
 pub struct EmailMessage {
     /// Value of the `Message-ID` header.
@@ -26,8 +26,6 @@ pub struct EmailMessage {
 pub struct ImapFolder {
     /// Folder name as returned by the server.
     pub name: String,
-    /// Hierarchy delimiter (e.g. `"/"` or `"."`).
-    pub delimiter: Option<String>,
     /// Whether this folder can be selected (i.e. contains messages).
     pub is_selectable: bool,
 }
@@ -167,7 +165,6 @@ pub async fn discover_folders(config: &ImapConfig) -> Result<Vec<ImapFolder>, Im
 
             ImapFolder {
                 name: name.name().to_owned(),
-                delimiter: name.delimiter().map(|d| d.to_string()),
                 is_selectable,
             }
         })
@@ -354,8 +351,8 @@ fn parse_message(raw: &async_imap::types::Fetch) -> Option<EmailMessage> {
     })
 }
 
-impl ToMarkdown for EmailMessage {
-    fn to_markdown(&self) -> String {
+impl EmailMessage {
+    pub fn to_markdown(&self) -> String {
         let date = DateTime::from_timestamp(self.timestamp, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
@@ -364,18 +361,6 @@ impl ToMarkdown for EmailMessage {
             "# {}\n\n**From:** {}\n**Date:** {}\n\n{}",
             self.subject, self.from, date, self.body
         )
-    }
-}
-
-impl SourceItem for EmailMessage {
-    fn id(&self) -> &str {
-        &self.message_id
-    }
-    fn timestamp(&self) -> i64 {
-        self.timestamp
-    }
-    fn author(&self) -> &str {
-        &self.from
     }
 }
 
