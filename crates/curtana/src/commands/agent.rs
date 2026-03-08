@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 use crate::event::{ChannelWriter, CommandResult, Event};
 
 use super::{
-    AGENT_SYSTEM_PROMPT, ConversationEntry, MAX_GATHERING_BYTES, MAX_HISTORY_ENTRIES,
-    MAX_SOURCES_CHARS, MAX_TURNS, Models, TeeWriter, condense_sources, format_conversation_context,
+    ConversationEntry, MAX_GATHERING_BYTES, MAX_HISTORY_ENTRIES, MAX_SOURCES_CHARS, MAX_TURNS,
+    Models, TeeWriter, agent_system_prompt, condense_sources, format_conversation_context,
 };
 
 /// Runs the agent query pipeline: gathering phase (tool-use loop),
@@ -44,10 +44,8 @@ pub(crate) async fn run(
     tx.send(Event::StatusText("Thinking...".into())).ok();
 
     // Set the agent system prompt.
-    if let Err(e) = models
-        .chat
-        .replace_system_prompt(AGENT_SYSTEM_PROMPT.to_string())
-    {
+    let system_prompt = agent_system_prompt();
+    if let Err(e) = models.chat.replace_system_prompt(system_prompt.clone()) {
         tx.send(Event::Error(format!("failed to set agent prompt: {e:?}")))
             .ok();
         return;
@@ -75,7 +73,7 @@ pub(crate) async fn run(
     let mut gathered_sources: Vec<ScoredArtifact> = Vec::new();
     let mut gathered_context: Vec<String> = Vec::new();
     let mut prompt = opening_prompt;
-    let mut accumulated_bytes: usize = AGENT_SYSTEM_PROMPT.len();
+    let mut accumulated_bytes: usize = system_prompt.len();
 
     for turn in 0..MAX_TURNS {
         // Context budget guard based on actual content bytes.
@@ -172,7 +170,7 @@ pub(crate) async fn run(
     if gathered_sources.is_empty() && gathered_context.is_empty() {
         // Pure fallback: model never produced anything useful.
         let router = Router::new(manifest, data_dir.to_path_buf());
-        let results = match router.search(&mut models.embed, query, 15).await {
+        let results = match router.search(&mut models.embed, query, 15, 0.0).await {
             Ok(r) => r,
             Err(e) => {
                 tx.send(Event::Error(format!("search failed: {e}"))).ok();
@@ -190,7 +188,7 @@ pub(crate) async fn run(
         // Model answered directly or context was gathered but no ScoredArtifacts.
         // Do a Router::search for source attribution.
         let router = Router::new(manifest, data_dir.to_path_buf());
-        let results = match router.search(&mut models.embed, query, 15).await {
+        let results = match router.search(&mut models.embed, query, 15, 0.0).await {
             Ok(r) => r,
             Err(e) => {
                 tx.send(Event::Error(format!("search failed: {e}"))).ok();

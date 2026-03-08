@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use curtana_knows::manifest::Manifest;
-use curtana_knows::{Artifact, open_taxonomy_store, router};
+use curtana_knows::{Artifact, open_source_store, router};
 use curtana_reads::imap;
 use curtana_reads::{SourceItem, ToMarkdown};
 use tokio::sync::mpsc;
@@ -46,6 +46,39 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
 
         set_status(tx, &format!("Fetching {taxonomy_name}..."));
 
+        // Open source store (DB-per-source).
+        let source_key = entry.source_key();
+        let store = match open_source_store(&data_dir, &source_key).await {
+            Ok(s) => s,
+            Err(e) => {
+                summary_lines.push(format!("- **{taxonomy_name}**: error opening store ({e})"));
+                continue;
+            }
+        };
+
+        // Migration safeguard: if the taxonomy had a cursor (incremental mode)
+        // but the new source store has zero artifacts for this taxonomy, the
+        // old per-taxonomy DB was orphaned. Reset cursor to force a full re-fetch.
+        let mut effective_cursor = entry.cursor.clone();
+        if effective_cursor.is_some() {
+            match store.count(taxonomy_name).await {
+                Ok(0) => {
+                    eprintln!(
+                        "warning: taxonomy {taxonomy_name} has cursor but 0 artifacts in \
+                         source store {source_key} — resetting cursor for full re-fetch"
+                    );
+                    effective_cursor = None;
+                    if let Some(e) = manifest.taxonomies.get_mut(taxonomy_name) {
+                        e.cursor = None;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("warning: failed to count artifacts for {taxonomy_name}: {e}");
+                }
+            }
+        }
+
         // Fetch artifacts from source.
         let (artifacts, new_cursor) = match find_source(
             config,
@@ -54,7 +87,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
             &entry.source_username,
         ) {
             Some(source) => {
-                match fetch_artifacts(source, &entry.source_id, entry.cursor.as_deref()).await {
+                match fetch_artifacts(source, &entry.source_id, effective_cursor.as_deref()).await {
                     Ok(result) => result,
                     Err(e) => {
                         summary_lines.push(format!("- **{taxonomy_name}**: error ({e})"));
@@ -68,19 +101,12 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
             }
         };
 
-        let is_incremental = entry.cursor.is_some();
+        let is_incremental = effective_cursor.is_some();
         let count = artifacts.len();
 
-        // Upsert into taxonomy store.
-        let store = match open_taxonomy_store(&data_dir, taxonomy_name).await {
-            Ok(s) => s,
-            Err(e) => {
-                summary_lines.push(format!("- **{taxonomy_name}**: error opening store ({e})"));
-                continue;
-            }
-        };
+        // Upsert into source store with taxonomy discriminator.
         for artifact in &artifacts {
-            if let Err(e) = store.upsert(artifact).await {
+            if let Err(e) = store.upsert(taxonomy_name, artifact).await {
                 summary_lines.push(format!("- **{taxonomy_name}**: upsert error ({e})"));
                 continue;
             }
@@ -89,7 +115,7 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
         // Embed pending artifacts.
         let embed_label = format!("Embedding {taxonomy_name}");
         if let Err(e) = store
-            .embed_pending(&mut models.embed, |current, total| {
+            .embed_pending(taxonomy_name, &mut models.embed, |current, total| {
                 tx.send(Event::Progress(Progress {
                     current,
                     total,
@@ -119,7 +145,8 @@ pub(crate) async fn run(config: &Config, models: &mut Models, tx: &mpsc::Unbound
                 tx,
                 &format!("Generating description for {taxonomy_name}..."),
             );
-            let description = router::generate_description(&store, &mut models.chat, 10).await;
+            let description =
+                router::generate_description(&store, taxonomy_name, &mut models.chat, 10).await;
             entry.description = description;
             entry.description_updated_at = Some(now);
         }

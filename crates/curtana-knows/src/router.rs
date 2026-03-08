@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use curtana_infers::{ChatModel, TextEmbeddingModel};
 
 use tracing::{debug, warn};
 
-use crate::{Artifact, manifest::Manifest, open_taxonomy_store};
+use crate::{Artifact, manifest::Manifest, open_source_store};
 
 /// Trade-off between relevance and diversity in MMR selection.
 /// 1.0 = pure relevance (equivalent to top-k), 0.0 = pure diversity.
@@ -98,14 +98,19 @@ impl Router {
     /// and reranks using MMR.
     ///
     /// Uses DB-level search to avoid loading all artifacts into memory:
-    /// each taxonomy store returns only the top candidates, which are then
+    /// each source store returns only the top candidates, which are then
     /// merged and re-ranked with MMR.
     pub async fn search(
         &self,
         embed_model: &mut TextEmbeddingModel,
         query: &str,
         top_k: usize,
+        recency_weight: f32,
     ) -> Result<Vec<ScoredArtifact>, crate::Error> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let query_embedding = embed_model
             .embed(&[query])
             .map_err(|e| crate::Error::EmbeddingError(format!("{e:?}")))?
@@ -113,33 +118,50 @@ impl Router {
             .ok_or_else(|| crate::Error::EmbeddingError("no embedding returned".into()))?;
         let taxonomy_names = self.route(embed_model, &query_embedding);
 
+        // Group routed taxonomy names by source_key so we open one DB per source.
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in &taxonomy_names {
+            if let Some(entry) = self.manifest.taxonomies.get(name) {
+                groups
+                    .entry(entry.source_key())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+
         // Fetch more candidates than top_k from each store to give MMR
         // enough diversity to work with, but still bounded.
         let candidate_limit = top_k * 3;
         let mut all_scored = Vec::new();
 
-        for name in &taxonomy_names {
-            let store = match open_taxonomy_store(&self.data_dir, name).await {
+        for (source_key, group_taxonomies) in &groups {
+            let store = match open_source_store(&self.data_dir, source_key).await {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!("failed to open store for {name}: {e}");
+                    warn!("failed to open store for {source_key}: {e}");
                     continue;
                 }
             };
             let candidates = match store
-                .search_candidates(&query_embedding, candidate_limit)
+                .search_candidates(
+                    group_taxonomies,
+                    &query_embedding,
+                    candidate_limit,
+                    recency_weight,
+                    now,
+                )
                 .await
             {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!("failed to search store for {name}: {e}");
+                    warn!("failed to search store for {source_key}: {e}");
                     continue;
                 }
             };
 
-            for (_id, score, artifact) in candidates {
+            for (taxonomy, _id, score, artifact) in candidates {
                 all_scored.push(ScoredArtifact {
-                    taxonomy: name.clone(),
+                    taxonomy,
                     score,
                     artifact,
                 });
@@ -244,10 +266,11 @@ fn max_chunk_similarity(a_chunks: &[Vec<f32>], b_chunks: &[Vec<f32>]) -> f32 {
 /// taxonomy description via the chat model.
 pub async fn generate_description(
     store: &crate::Store,
+    taxonomy: &str,
     chat_model: &mut ChatModel,
     sample_size: usize,
 ) -> String {
-    let samples = match store.sample(sample_size).await {
+    let samples = match store.sample(taxonomy, sample_size).await {
         Ok(s) => s,
         Err(e) => {
             warn!("failed to sample artifacts for description: {e}");

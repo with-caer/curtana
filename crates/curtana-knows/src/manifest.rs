@@ -70,6 +70,34 @@ impl From<toml::ser::Error> for ManifestError {
     }
 }
 
+/// Lowercases and replaces non-alphanumeric characters with hyphens,
+/// collapsing consecutive hyphens and trimming leading/trailing hyphens.
+fn sanitize_key_part(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+impl TaxonomyEntry {
+    /// Produces a filesystem-safe key from `source_type`, `source_host`, and
+    /// `source_username`. Taxonomies sharing the same source key can share a
+    /// single DuckDB file, with a `taxonomy` column discriminating rows.
+    pub fn source_key(&self) -> String {
+        format!(
+            "{}-{}-{}",
+            sanitize_key_part(&self.source_type),
+            sanitize_key_part(&self.source_host),
+            sanitize_key_part(&self.source_username),
+        )
+    }
+}
+
 impl Manifest {
     /// Loads a manifest from `path`. Returns an empty manifest if the file
     /// does not exist.
@@ -134,5 +162,45 @@ mod tests {
         let path = std::env::temp_dir().join("curtana-does-not-exist.toml");
         let manifest = Manifest::load(&path).unwrap();
         assert!(manifest.taxonomies.is_empty());
+    }
+
+    #[test]
+    fn source_key_basic() {
+        let entry = TaxonomyEntry {
+            name: "test".to_string(),
+            description: String::new(),
+            source_type: "imap".to_string(),
+            source_id: "INBOX".to_string(),
+            source_host: "imap.gmail.com".to_string(),
+            source_username: "user@gmail.com".to_string(),
+            last_ingested_at: None,
+            description_updated_at: None,
+            cursor: None,
+        };
+        assert_eq!(entry.source_key(), "imap-imap-gmail-com-user-gmail-com");
+    }
+
+    #[test]
+    fn source_key_collapses_special_chars() {
+        let entry = TaxonomyEntry {
+            name: "test".to_string(),
+            description: String::new(),
+            source_type: "imap".to_string(),
+            source_id: "INBOX".to_string(),
+            source_host: "mail..example...com".to_string(),
+            source_username: "u@e".to_string(),
+            last_ingested_at: None,
+            description_updated_at: None,
+            cursor: None,
+        };
+        assert_eq!(entry.source_key(), "imap-mail-example-com-u-e");
+    }
+
+    #[test]
+    fn sanitize_key_part_edge_cases() {
+        assert_eq!(super::sanitize_key_part(""), "");
+        assert_eq!(super::sanitize_key_part("---"), "");
+        assert_eq!(super::sanitize_key_part("ABC"), "abc");
+        assert_eq!(super::sanitize_key_part("a..b@@c"), "a-b-c");
     }
 }

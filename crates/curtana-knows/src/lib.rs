@@ -58,37 +58,30 @@ impl Store {
 
             connection
                 .execute(
-                    "CREATE TABLE IF NOT EXISTS artifacts (id VARCHAR PRIMARY KEY, data BLOB);",
-                    [],
-                )
-                .map_err(|e| Error::DatabaseError(e.to_string()))?;
-
-            // Backwards-compatible schema migration: add structured columns
-            // for SQL-level filtering. These are denormalized from the blob.
-            let _ = connection.execute(
-                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS timestamp BIGINT",
-                [],
-            );
-            let _ = connection.execute(
-                "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS author VARCHAR",
-                [],
-            );
-
-            // Normalized embeddings table: one row per chunk.
-            connection
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS artifact_embeddings (
-                        artifact_id VARCHAR NOT NULL,
-                        chunk_index INTEGER NOT NULL,
-                        embedding FLOAT[] NOT NULL,
-                        PRIMARY KEY (artifact_id, chunk_index)
+                    "CREATE TABLE IF NOT EXISTS artifacts (
+                        taxonomy VARCHAR NOT NULL,
+                        id VARCHAR NOT NULL,
+                        data BLOB NOT NULL,
+                        timestamp BIGINT,
+                        author VARCHAR,
+                        PRIMARY KEY (taxonomy, id)
                     );",
                     [],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            // Drop legacy embedding BLOB column if it exists.
-            let _ = connection.execute("ALTER TABLE artifacts DROP COLUMN IF EXISTS embedding", []);
+            connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS artifact_embeddings (
+                        taxonomy VARCHAR NOT NULL,
+                        artifact_id VARCHAR NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        embedding FLOAT[] NOT NULL,
+                        PRIMARY KEY (taxonomy, artifact_id, chunk_index)
+                    );",
+                    [],
+                )
+                .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             Ok(())
         })
@@ -98,9 +91,10 @@ impl Store {
         Ok(this)
     }
 
-    pub async fn upsert(&self, artifact: &Artifact) -> Result<(), Error> {
+    pub async fn upsert(&self, taxonomy: &str, artifact: &Artifact) -> Result<(), Error> {
         let this = self.clone();
 
+        let taxonomy = taxonomy.to_string();
         let id = format!("{}", artifact.id);
         let timestamp = artifact.timestamp as i64;
         let author = format!("{}", artifact.author);
@@ -116,6 +110,7 @@ impl Store {
             .iter()
             .map(|chunk| embedding_to_sql_literal(chunk))
             .collect();
+        let taxonomy_for_embeddings = taxonomy.clone();
         let id_for_embeddings = id.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
@@ -123,26 +118,26 @@ impl Store {
 
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO artifacts (id, data, timestamp, author) VALUES (?, ?, ?, ?)",
-                    params![id.as_str(), data_bytes, timestamp, author.as_str()],
+                    "INSERT OR REPLACE INTO artifacts (taxonomy, id, data, timestamp, author) VALUES (?, ?, ?, ?, ?)",
+                    params![taxonomy.as_str(), id.as_str(), data_bytes, timestamp, author.as_str()],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             // Replace embedding rows for this artifact.
             connection
                 .execute(
-                    "DELETE FROM artifact_embeddings WHERE artifact_id = ?",
-                    params![id_for_embeddings.as_str()],
+                    "DELETE FROM artifact_embeddings WHERE taxonomy = ? AND artifact_id = ?",
+                    params![taxonomy_for_embeddings.as_str(), id_for_embeddings.as_str()],
                 )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             for (chunk_index, literal) in embedding_literals.iter().enumerate() {
                 let sql = format!(
-                    "INSERT INTO artifact_embeddings (artifact_id, chunk_index, embedding) VALUES (?, ?, {})",
+                    "INSERT INTO artifact_embeddings (taxonomy, artifact_id, chunk_index, embedding) VALUES (?, ?, ?, {})",
                     literal
                 );
                 connection
-                    .execute(&sql, params![id_for_embeddings.as_str(), chunk_index as i32])
+                    .execute(&sql, params![taxonomy_for_embeddings.as_str(), id_for_embeddings.as_str(), chunk_index as i32])
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
             }
 
@@ -152,15 +147,21 @@ impl Store {
         .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 
-    pub async fn get(&self, id: Text, data: &mut impl Decodable) -> Result<(), Error> {
+    pub async fn get(
+        &self,
+        taxonomy: &str,
+        id: Text,
+        data: &mut impl Decodable,
+    ) -> Result<(), Error> {
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
 
         let data_bytes: Vec<u8> = tokio::task::spawn_blocking(move || {
             let connection = this.connection.blocking_lock();
             connection
                 .query_row(
-                    "SELECT data FROM artifacts WHERE id=(?)",
-                    params![id.as_str()],
+                    "SELECT data FROM artifacts WHERE taxonomy = ? AND id = ?",
+                    params![taxonomy.as_str(), id.as_str()],
                     |row| row.get(0),
                 )
                 .ok()
@@ -183,10 +184,12 @@ impl Store {
     /// each chunk is embedded separately.
     pub async fn embed_pending(
         &self,
+        taxonomy: &str,
         model: &mut TextEmbeddingModel,
         mut on_progress: impl FnMut(usize, usize),
     ) -> Result<(), Error> {
         let this = self.clone();
+        let taxonomy_owned = taxonomy.to_string();
 
         // Find all unembedded artifacts.
         let unembedded: Vec<(String, Artifact)> = tokio::task::spawn_blocking(move || {
@@ -194,7 +197,9 @@ impl Store {
 
             let mut statement = match connection.prepare(
                 "SELECT a.id, a.data FROM artifacts a \
-                 WHERE NOT EXISTS (SELECT 1 FROM artifact_embeddings e WHERE e.artifact_id = a.id)",
+                 WHERE a.taxonomy = ? \
+                 AND NOT EXISTS (SELECT 1 FROM artifact_embeddings e \
+                     WHERE e.taxonomy = a.taxonomy AND e.artifact_id = a.id)",
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -202,7 +207,7 @@ impl Store {
                     return vec![];
                 }
             };
-            let rows = match statement.query_map([], |row| {
+            let rows = match statement.query_map(params![taxonomy_owned.as_str()], |row| {
                 let id: String = row.get(0)?;
                 let data: Vec<u8> = row.get(1)?;
                 Ok((id, data))
@@ -232,10 +237,11 @@ impl Store {
         info!("embedding {} artifacts", total);
         on_progress(0, total);
 
+        let taxonomy_str = taxonomy.to_string();
         for (i, (_artifact_id, mut artifact)) in unembedded.into_iter().enumerate() {
             let text = format!("{}", artifact.contents);
             artifact.embedding = embed_with_chunking(model, &text, 0);
-            self.upsert(&artifact).await?;
+            self.upsert(&taxonomy_str, &artifact).await?;
             on_progress(i + 1, total);
 
             if i % 50 == 0 {
@@ -247,17 +253,18 @@ impl Store {
     }
 
     /// Returns a random sample of up to `limit` artifacts from the store.
-    pub async fn sample(&self, limit: usize) -> Result<Vec<Artifact>, Error> {
+    pub async fn sample(&self, taxonomy: &str, limit: usize) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
             let mut statement = connection
-                .prepare("SELECT data FROM artifacts ORDER BY RANDOM() LIMIT ?")
+                .prepare("SELECT data FROM artifacts WHERE taxonomy = ? ORDER BY RANDOM() LIMIT ?")
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
-                .query_map(params![limit], |row| {
+                .query_map(params![taxonomy.as_str(), limit], |row| {
                     let data: Vec<u8> = row.get(0)?;
                     Ok(data)
                 })
@@ -280,11 +287,18 @@ impl Store {
     /// Uses a two-phase approach:
     /// 1. DuckDB-native `list_cosine_similarity` to score and pick top-k IDs
     /// 2. Load full artifact data only for the top-k
+    ///
+    /// When `recency_weight` is in `(0.0, 1.0]`, the score blends cosine
+    /// similarity with an exponential time-decay signal:
+    ///   score = (1 - rw) * cosine + rw * exp(-age_days * ln2 / 14)
     pub async fn search(
         &self,
+        taxonomy: &str,
         model: &mut TextEmbeddingModel,
         query: &str,
         top_k: usize,
+        recency_weight: f32,
+        now: u64,
     ) -> Result<Vec<Artifact>, Error> {
         // Embed the query.
         let query_embedding = model
@@ -295,32 +309,64 @@ impl Store {
 
         // Phase 1: Score embeddings entirely in DuckDB.
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
+        let taxonomy_phase2 = taxonomy.clone();
         let query_literal = embedding_to_sql_literal(&query_embedding);
+        let rw = recency_weight.clamp(0.0, 1.0);
         let scored_ids: Vec<(String, f32)> =
             tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
                 let connection = this.connection.blocking_lock();
 
-                let sql = format!(
-                    "SELECT e.artifact_id, \
-                        MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
-                 FROM artifact_embeddings e \
-                 GROUP BY e.artifact_id \
-                 HAVING score > 0.0 \
-                 ORDER BY score DESC \
-                 LIMIT ?",
-                );
+                let sql = if rw > 0.0 {
+                    let decay = f64::ln(2.0) / RECENCY_HALF_LIFE_DAYS;
+                    format!(
+                        "SELECT e.artifact_id, \
+                            (1.0 - {rw}) * MAX(list_cosine_similarity(e.embedding, {query_literal})) \
+                            + {rw} * exp(-(CAST(? AS DOUBLE) - COALESCE(a.timestamp, 0)) / 86400.0 * {decay}) \
+                            AS score \
+                         FROM artifact_embeddings e \
+                         JOIN artifacts a ON a.taxonomy = e.taxonomy AND a.id = e.artifact_id \
+                         WHERE e.taxonomy = ? \
+                         GROUP BY e.artifact_id, a.timestamp \
+                         HAVING score > 0.0 \
+                         ORDER BY score DESC \
+                         LIMIT ?",
+                    )
+                } else {
+                    format!(
+                        "SELECT e.artifact_id, \
+                            MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
+                         FROM artifact_embeddings e \
+                         WHERE e.taxonomy = ? \
+                         GROUP BY e.artifact_id \
+                         HAVING score > 0.0 \
+                         ORDER BY score DESC \
+                         LIMIT ?",
+                    )
+                };
                 let mut statement = connection
                     .prepare(&sql)
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
-                let rows = statement
-                    .query_map(params![top_k as i64], |row| {
-                        let id: String = row.get(0)?;
-                        let score: f64 = row.get(1)?;
-                        Ok((id, score as f32))
-                    })
-                    .map_err(|e| Error::DatabaseError(e.to_string()))?;
+                let extract = |row: &duckdb::Row<'_>| -> duckdb::Result<(String, f32)> {
+                    let id: String = row.get(0)?;
+                    let score: f64 = row.get(1)?;
+                    Ok((id, score as f32))
+                };
+                let results: Vec<(String, f32)> = if rw > 0.0 {
+                    statement
+                        .query_map(params![now as i64, taxonomy.as_str(), top_k as i64], extract)
+                        .map_err(|e| Error::DatabaseError(e.to_string()))?
+                        .flatten()
+                        .collect()
+                } else {
+                    statement
+                        .query_map(params![taxonomy.as_str(), top_k as i64], extract)
+                        .map_err(|e| Error::DatabaseError(e.to_string()))?
+                        .flatten()
+                        .collect()
+                };
 
-                Ok(rows.flatten().collect())
+                Ok(results)
             })
             .await
             .map_err(|e| Error::SpawnError(e.to_string()))??;
@@ -330,6 +376,7 @@ impl Store {
         }
 
         // Phase 2: Load full artifact data only for top-k IDs.
+        let taxonomy = taxonomy_phase2;
         let ids: Vec<String> = scored_ids.iter().map(|(id, _)| id.clone()).collect();
         let this = self.clone();
         let mut artifacts: Vec<Artifact> =
@@ -337,13 +384,20 @@ impl Store {
                 let connection = this.connection.blocking_lock();
 
                 let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!("SELECT data FROM artifacts WHERE id IN ({placeholders})");
+                let sql = format!(
+                    "SELECT data FROM artifacts WHERE taxonomy = ? AND id IN ({placeholders})"
+                );
                 let mut statement = connection
                     .prepare(&sql)
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
+                let mut params_vec: Vec<Box<dyn duckdb::types::ToSql>> = Vec::new();
+                params_vec.push(Box::new(taxonomy));
+                for id in &ids {
+                    params_vec.push(Box::new(id.clone()));
+                }
                 let param_refs: Vec<&dyn duckdb::types::ToSql> =
-                    ids.iter().map(|s| s as &dyn duckdb::types::ToSql).collect();
+                    params_vec.iter().map(|b| b.as_ref()).collect();
                 let rows = statement
                     .query_map(param_refs.as_slice(), |row| {
                         let data: Vec<u8> = row.get(0)?;
@@ -379,108 +433,187 @@ impl Store {
         Ok(artifacts)
     }
 
-    /// Returns scored artifacts for MMR re-ranking. Scores embeddings in DuckDB,
-    /// then loads full artifact data for the top candidates (needed for MMR
-    /// inter-similarity computation via `Artifact.embedding`).
+    /// Returns scored artifacts for MMR re-ranking across multiple taxonomies.
+    /// Scores embeddings in DuckDB, then loads full artifact data for the top
+    /// candidates (needed for MMR inter-similarity computation via
+    /// `Artifact.embedding`).
+    ///
+    /// Returns `(taxonomy, id, score, artifact)` tuples.
     pub async fn search_candidates(
         &self,
+        taxonomies: &[String],
         query_embedding: &[f32],
         candidate_limit: usize,
-    ) -> Result<Vec<(String, f32, Artifact)>, Error> {
+        recency_weight: f32,
+        now: u64,
+    ) -> Result<Vec<(String, String, f32, Artifact)>, Error> {
         let this = self.clone();
         let query_literal = embedding_to_sql_literal(query_embedding);
+        let taxonomies_owned: Vec<String> = taxonomies.to_vec();
+        let rw = recency_weight.clamp(0.0, 1.0);
 
         // Phase 1: Score embeddings entirely in DuckDB.
-        let scored_ids: Vec<(String, f32)> =
-            tokio::task::spawn_blocking(move || -> Result<Vec<(String, f32)>, Error> {
+        let scored_ids: Vec<(String, String, f32)> = tokio::task::spawn_blocking(
+            move || -> Result<Vec<(String, String, f32)>, Error> {
                 let connection = this.connection.blocking_lock();
 
-                let sql = format!(
-                    "SELECT e.artifact_id, \
-                        MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
-                 FROM artifact_embeddings e \
-                 GROUP BY e.artifact_id \
-                 HAVING score > 0.0 \
-                 ORDER BY score DESC \
-                 LIMIT ?",
-                );
+                let placeholders: String = taxonomies_owned
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = if rw > 0.0 {
+                    let decay = f64::ln(2.0) / RECENCY_HALF_LIFE_DAYS;
+                    format!(
+                        "SELECT e.taxonomy, e.artifact_id, \
+                            (1.0 - {rw}) * MAX(list_cosine_similarity(e.embedding, {query_literal})) \
+                            + {rw} * exp(-(CAST(? AS DOUBLE) - COALESCE(a.timestamp, 0)) / 86400.0 * {decay}) \
+                            AS score \
+                         FROM artifact_embeddings e \
+                         JOIN artifacts a ON a.taxonomy = e.taxonomy AND a.id = e.artifact_id \
+                         WHERE e.taxonomy IN ({placeholders}) \
+                         GROUP BY e.taxonomy, e.artifact_id, a.timestamp \
+                         HAVING score > 0.0 \
+                         ORDER BY score DESC \
+                         LIMIT ?",
+                    )
+                } else {
+                    format!(
+                        "SELECT e.taxonomy, e.artifact_id, \
+                            MAX(list_cosine_similarity(e.embedding, {query_literal})) AS score \
+                         FROM artifact_embeddings e \
+                         WHERE e.taxonomy IN ({placeholders}) \
+                         GROUP BY e.taxonomy, e.artifact_id \
+                         HAVING score > 0.0 \
+                         ORDER BY score DESC \
+                         LIMIT ?",
+                    )
+                };
                 let mut statement = connection
                     .prepare(&sql)
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
+
+                let mut params_vec: Vec<Box<dyn duckdb::types::ToSql>> = Vec::new();
+                if rw > 0.0 {
+                    params_vec.push(Box::new(now as i64));
+                }
+                for t in &taxonomies_owned {
+                    params_vec.push(Box::new(t.clone()));
+                }
+                params_vec.push(Box::new(candidate_limit as i64));
+                let param_refs: Vec<&dyn duckdb::types::ToSql> =
+                    params_vec.iter().map(|b| b.as_ref()).collect();
+
                 let rows = statement
-                    .query_map(params![candidate_limit as i64], |row| {
-                        let id: String = row.get(0)?;
-                        let score: f64 = row.get(1)?;
-                        Ok((id, score as f32))
+                    .query_map(param_refs.as_slice(), |row| {
+                        let taxonomy: String = row.get(0)?;
+                        let id: String = row.get(1)?;
+                        let score: f64 = row.get(2)?;
+                        Ok((taxonomy, id, score as f32))
                     })
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
                 Ok(rows.flatten().collect())
-            })
-            .await
-            .map_err(|e| Error::SpawnError(e.to_string()))??;
+            },
+        )
+        .await
+        .map_err(|e| Error::SpawnError(e.to_string()))??;
 
         if scored_ids.is_empty() {
             return Ok(vec![]);
         }
 
         // Phase 2: Load full artifact data for candidates.
-        let ids: Vec<String> = scored_ids.iter().map(|(id, _)| id.clone()).collect();
+        // Build a set of (taxonomy, id) pairs to fetch, and a score map.
+        let score_map: std::collections::HashMap<(String, String), f32> = scored_ids
+            .iter()
+            .map(|(t, id, s)| ((t.clone(), id.clone()), *s))
+            .collect();
+
+        let ids: Vec<String> = scored_ids.iter().map(|(_, id, _)| id.clone()).collect();
+        let taxonomy_set: Vec<String> = scored_ids
+            .iter()
+            .map(|(t, _, _)| t.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
         let this = self.clone();
-        let artifacts: Vec<Artifact> =
-            tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
+        let artifacts: Vec<(String, Artifact)> =
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, Artifact)>, Error> {
                 let connection = this.connection.blocking_lock();
 
-                let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!("SELECT data FROM artifacts WHERE id IN ({placeholders})");
+                let tax_placeholders: String = taxonomy_set
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let id_placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT taxonomy, data FROM artifacts \
+                     WHERE taxonomy IN ({tax_placeholders}) AND id IN ({id_placeholders})"
+                );
                 let mut statement = connection
                     .prepare(&sql)
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
+                let mut params_vec: Vec<Box<dyn duckdb::types::ToSql>> = Vec::new();
+                for t in &taxonomy_set {
+                    params_vec.push(Box::new(t.clone()));
+                }
+                for id in &ids {
+                    params_vec.push(Box::new(id.clone()));
+                }
                 let param_refs: Vec<&dyn duckdb::types::ToSql> =
-                    ids.iter().map(|s| s as &dyn duckdb::types::ToSql).collect();
+                    params_vec.iter().map(|b| b.as_ref()).collect();
+
                 let rows = statement
                     .query_map(param_refs.as_slice(), |row| {
-                        let data: Vec<u8> = row.get(0)?;
-                        Ok(data)
+                        let taxonomy: String = row.get(0)?;
+                        let data: Vec<u8> = row.get(1)?;
+                        Ok((taxonomy, data))
                     })
                     .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
                 Ok(rows
                     .into_iter()
                     .filter_map(|r| {
-                        let data = r.ok()?;
-                        data.as_slice().read_data().ok()
+                        let (taxonomy, data) = r.ok()?;
+                        let artifact: Artifact = data.as_slice().read_data().ok()?;
+                        Some((taxonomy, artifact))
                     })
                     .collect())
             })
             .await
             .map_err(|e| Error::SpawnError(e.to_string()))??;
 
-        // Build result with scores.
-        let id_to_score: std::collections::HashMap<String, f32> = scored_ids.into_iter().collect();
-        let mut result: Vec<(String, f32, Artifact)> = artifacts
+        // Build result with scores, filtering to only exact (taxonomy, id) matches.
+        let mut result: Vec<(String, String, f32, Artifact)> = artifacts
             .into_iter()
-            .map(|a| {
+            .filter_map(|(taxonomy, a)| {
                 let id_str = format!("{}", a.id);
-                let score = id_to_score.get(&id_str).copied().unwrap_or(0.0);
-                (id_str, score, a)
+                let key = (taxonomy.clone(), id_str.clone());
+                let score = score_map.get(&key).copied()?;
+                Some((taxonomy, id_str, score, a))
             })
             .collect();
-        result.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
+        result.sort_by(|a, b| a.2.total_cmp(&b.2).reverse());
         Ok(result)
     }
 
-    /// Returns the total number of artifacts in the store.
-    pub async fn count(&self) -> Result<usize, Error> {
+    /// Returns the total number of artifacts for a taxonomy in the store.
+    pub async fn count(&self, taxonomy: &str) -> Result<usize, Error> {
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let connection = this.connection.blocking_lock();
             let count = connection
-                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE taxonomy = ?",
+                    params![taxonomy.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             Ok(count as usize)
         })
@@ -491,28 +624,34 @@ impl Store {
     /// Browses artifacts ordered by timestamp.
     pub async fn browse(
         &self,
+        taxonomy: &str,
         offset: usize,
         limit: usize,
         order: BrowseOrder,
     ) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
         let order_sql = order.sql().to_string();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
 
             let sql = format!(
-                "SELECT data FROM artifacts ORDER BY COALESCE(timestamp, 0) {} LIMIT ? OFFSET ?",
+                "SELECT data FROM artifacts WHERE taxonomy = ? \
+                 ORDER BY COALESCE(timestamp, 0) {} LIMIT ? OFFSET ?",
                 order_sql,
             );
             let mut statement = connection
                 .prepare(&sql)
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
             let rows = statement
-                .query_map(params![limit as i64, offset as i64], |row| {
-                    let data: Vec<u8> = row.get(0)?;
-                    Ok(data)
-                })
+                .query_map(
+                    params![taxonomy.as_str(), limit as i64, offset as i64],
+                    |row| {
+                        let data: Vec<u8> = row.get(0)?;
+                        Ok(data)
+                    },
+                )
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
             Ok(rows
@@ -530,12 +669,14 @@ impl Store {
     /// Filters artifacts by author and/or time range.
     pub async fn filter(
         &self,
+        taxonomy: &str,
         author: Option<String>,
         after: Option<u64>,
         before: Option<u64>,
         limit: usize,
     ) -> Result<Vec<Artifact>, Error> {
         let this = self.clone();
+        let taxonomy = taxonomy.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<Artifact>, Error> {
             let connection = this.connection.blocking_lock();
@@ -550,7 +691,8 @@ impl Store {
             let mut statement = connection
                 .prepare(
                     "SELECT data FROM artifacts \
-                     WHERE (NOT ? OR author = ?) \
+                     WHERE taxonomy = ? \
+                     AND (NOT ? OR author = ?) \
                      AND (NOT ? OR timestamp >= ?) \
                      AND (NOT ? OR timestamp <= ?) \
                      ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?",
@@ -560,6 +702,7 @@ impl Store {
             let rows = statement
                 .query_map(
                     params![
+                        taxonomy.as_str(),
                         has_author,
                         author_val.as_str(),
                         has_after,
@@ -587,6 +730,10 @@ impl Store {
         .map_err(|e| Error::SpawnError(e.to_string()))?
     }
 }
+
+/// Half-life in days for the recency exponential decay.
+/// After 14 days, a recency signal of 1.0 decays to 0.5.
+const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 
 /// Maximum recursion depth for embedding chunking.
 const MAX_CHUNK_DEPTH: usize = 8;
@@ -696,21 +843,21 @@ fn char_chunks(text: &str, byte_budget: usize) -> Vec<&str> {
     chunks
 }
 
-/// Opens a taxonomy-specific store at `{data_dir}/{taxonomy_name}.duckdb`.
+/// Opens a source-specific store at `{data_dir}/{source_key}.duckdb`.
 ///
-/// `taxonomy_name` must be non-empty and consist only of alphanumeric
+/// `source_key` must be non-empty and consist only of alphanumeric
 /// characters, hyphens, or underscores to prevent path traversal.
-pub async fn open_taxonomy_store(data_dir: &Path, taxonomy_name: &str) -> Result<Store, Error> {
-    if taxonomy_name.is_empty()
-        || !taxonomy_name
+pub async fn open_source_store(data_dir: &Path, source_key: &str) -> Result<Store, Error> {
+    if source_key.is_empty()
+        || !source_key
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return Err(Error::DatabaseError(format!(
-            "invalid taxonomy name: {taxonomy_name:?}"
+            "invalid source key: {source_key:?}"
         )));
     }
-    let path = data_dir.join(format!("{taxonomy_name}.duckdb"));
+    let path = data_dir.join(format!("{source_key}.duckdb"));
     let path_str = path
         .to_str()
         .ok_or_else(|| Error::DatabaseError("non-UTF8 path".into()))?;
@@ -742,6 +889,8 @@ impl fmt::Display for Error {
 mod tests {
 
     use super::*;
+
+    const TEST_TAX: &str = "test-taxonomy";
 
     #[test]
     fn escape_xml_special_chars() {
@@ -814,7 +963,7 @@ mod tests {
             embedding: vec![],
         };
 
-        store.upsert(&artifact).await.unwrap();
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
 
         let mut found = Artifact {
             id: Text::EMPTY,
@@ -823,7 +972,7 @@ mod tests {
             contents: Text::EMPTY,
             embedding: vec![],
         };
-        assert!(store.get("abc".into(), &mut found).await.is_ok());
+        assert!(store.get(TEST_TAX, "abc".into(), &mut found).await.is_ok());
         assert_eq!(format!("{}", found.contents), "hello, testy");
         assert_eq!(found.timestamp, 1700000000);
         assert_eq!(format!("{}", found.author), "tester");
@@ -831,7 +980,7 @@ mod tests {
         let mut not_found = Text::EMPTY;
         assert_eq!(
             Err(Error::NotFound),
-            store.get("xyz".into(), &mut not_found).await
+            store.get(TEST_TAX, "xyz".into(), &mut not_found).await
         );
     }
 
@@ -871,29 +1020,34 @@ mod tests {
             contents: "none".into(),
             embedding: vec![],
         };
-        store.upsert(&close).await.unwrap();
-        store.upsert(&far).await.unwrap();
-        store.upsert(&none).await.unwrap();
+        store.upsert(TEST_TAX, &close).await.unwrap();
+        store.upsert(TEST_TAX, &far).await.unwrap();
+        store.upsert(TEST_TAX, &none).await.unwrap();
 
         // Query pointing in the same direction as "close".
         let query = [1.0_f32, 0.0, 0.0];
-        let results = store.search_candidates(&query, 10).await.unwrap();
+        let taxonomies = vec![TEST_TAX.to_string()];
+        let results = store
+            .search_candidates(&taxonomies, &query, 10, 0.0, 0)
+            .await
+            .unwrap();
 
         // "close" should rank first (cosine similarity 1.0).
         assert!(!results.is_empty());
-        assert_eq!(results[0].0, "close");
-        assert!((results[0].1 - 1.0).abs() < 1e-5);
+        assert_eq!(results[0].0, TEST_TAX);
+        assert_eq!(results[0].1, "close");
+        assert!((results[0].2 - 1.0).abs() < 1e-5);
 
         // "far" should also appear (cosine similarity 0.0 is not > 0,
         // so it may be excluded by the HAVING clause). If present, it
         // must rank after "close".
         if results.len() > 1 {
-            assert_eq!(results[1].0, "far");
-            assert!(results[1].1 < results[0].1);
+            assert_eq!(results[1].1, "far");
+            assert!(results[1].2 < results[0].2);
         }
 
         // "none" must never appear — it has no embeddings.
-        assert!(results.iter().all(|(id, _, _)| id != "none"));
+        assert!(results.iter().all(|(_, id, _, _)| id != "none"));
     }
 
     #[tokio::test]
@@ -911,15 +1065,20 @@ mod tests {
                 vec![1.0, 0.0, 0.0], // chunk 1: identical to query
             ],
         };
-        store.upsert(&artifact).await.unwrap();
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
 
         let query = [1.0_f32, 0.0, 0.0];
-        let results = store.search_candidates(&query, 10).await.unwrap();
+        let taxonomies = vec![TEST_TAX.to_string()];
+        let results = store
+            .search_candidates(&taxonomies, &query, 10, 0.0, 0)
+            .await
+            .unwrap();
 
         // Should appear with the best chunk's score (~1.0), not the worst.
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "multi");
-        assert!((results[0].1 - 1.0).abs() < 1e-5);
+        assert_eq!(results[0].0, TEST_TAX);
+        assert_eq!(results[0].1, "multi");
+        assert!((results[0].2 - 1.0).abs() < 1e-5);
     }
 
     #[tokio::test]
@@ -934,19 +1093,27 @@ mod tests {
             contents: "a".into(),
             embedding: vec![vec![1.0, 0.0, 0.0]],
         };
-        store.upsert(&artifact).await.unwrap();
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
 
         // Re-upsert with embedding pointing in +y instead.
         artifact.embedding = vec![vec![0.0, 1.0, 0.0]];
-        store.upsert(&artifact).await.unwrap();
+        store.upsert(TEST_TAX, &artifact).await.unwrap();
+
+        let taxonomies = vec![TEST_TAX.to_string()];
 
         // Query in +x should no longer match well.
-        let results_x = store.search_candidates(&[1.0, 0.0, 0.0], 10).await.unwrap();
+        let results_x = store
+            .search_candidates(&taxonomies, &[1.0, 0.0, 0.0], 10, 0.0, 0)
+            .await
+            .unwrap();
         // Query in +y should match.
-        let results_y = store.search_candidates(&[0.0, 1.0, 0.0], 10).await.unwrap();
+        let results_y = store
+            .search_candidates(&taxonomies, &[0.0, 1.0, 0.0], 10, 0.0, 0)
+            .await
+            .unwrap();
 
         assert_eq!(results_y.len(), 1);
-        assert!((results_y[0].1 - 1.0).abs() < 1e-5);
+        assert!((results_y[0].2 - 1.0).abs() < 1e-5);
 
         // +x query: cosine similarity is 0.0, filtered out by HAVING > 0.
         assert!(results_x.is_empty());
@@ -965,28 +1132,37 @@ mod tests {
                 contents: format!("content {i}").into(),
                 embedding: vec![],
             };
-            store.upsert(&artifact).await.unwrap();
+            store.upsert(TEST_TAX, &artifact).await.unwrap();
         }
 
-        assert_eq!(store.count().await.unwrap(), 3);
+        assert_eq!(store.count(TEST_TAX).await.unwrap(), 3);
 
         // Browse descending.
-        let browsed = store.browse(0, 10, BrowseOrder::Desc).await.unwrap();
+        let browsed = store
+            .browse(TEST_TAX, 0, 10, BrowseOrder::Desc)
+            .await
+            .unwrap();
         assert_eq!(browsed.len(), 3);
         assert_eq!(browsed[0].timestamp, 1002);
 
         // Browse ascending.
-        let browsed = store.browse(0, 10, BrowseOrder::Asc).await.unwrap();
+        let browsed = store
+            .browse(TEST_TAX, 0, 10, BrowseOrder::Asc)
+            .await
+            .unwrap();
         assert_eq!(browsed[0].timestamp, 1000);
 
         // Browse with offset/limit.
-        let browsed = store.browse(1, 1, BrowseOrder::Desc).await.unwrap();
+        let browsed = store
+            .browse(TEST_TAX, 1, 1, BrowseOrder::Desc)
+            .await
+            .unwrap();
         assert_eq!(browsed.len(), 1);
         assert_eq!(browsed[0].timestamp, 1001);
 
         // Filter by author.
         let filtered = store
-            .filter(Some("alice".to_string()), None, None, 10)
+            .filter(TEST_TAX, Some("alice".to_string()), None, None, 10)
             .await
             .unwrap();
         assert_eq!(filtered.len(), 1);
@@ -994,13 +1170,63 @@ mod tests {
 
         // Filter by time range.
         let filtered = store
-            .filter(None, Some(1001), Some(1002), 10)
+            .filter(TEST_TAX, None, Some(1001), Some(1002), 10)
             .await
             .unwrap();
         assert_eq!(filtered.len(), 2);
 
         // Filter with limit.
-        let filtered = store.filter(None, None, None, 2).await.unwrap();
+        let filtered = store.filter(TEST_TAX, None, None, None, 2).await.unwrap();
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn recency_weight_favors_newer_artifact() {
+        let store = Store::new(None).await.unwrap();
+
+        // Two artifacts with identical embeddings but different timestamps.
+        let now: u64 = 1_700_000_000;
+        let old = Artifact {
+            id: "old".into(),
+            timestamp: now - 30 * 86400, // 30 days ago
+            author: "t".into(),
+            contents: "old".into(),
+            embedding: vec![vec![1.0, 0.0, 0.0]],
+        };
+        let recent = Artifact {
+            id: "recent".into(),
+            timestamp: now - 86400, // 1 day ago
+            author: "t".into(),
+            contents: "recent".into(),
+            embedding: vec![vec![1.0, 0.0, 0.0]],
+        };
+        store.upsert(TEST_TAX, &old).await.unwrap();
+        store.upsert(TEST_TAX, &recent).await.unwrap();
+
+        let query = [1.0_f32, 0.0, 0.0];
+        let taxonomies = vec![TEST_TAX.to_string()];
+
+        // With recency_weight = 0, both should score identically (same embedding).
+        let results_no_recency = store
+            .search_candidates(&taxonomies, &query, 10, 0.0, now)
+            .await
+            .unwrap();
+        assert_eq!(results_no_recency.len(), 2);
+        assert!(
+            (results_no_recency[0].2 - results_no_recency[1].2).abs() < 1e-5,
+            "without recency, scores should be equal"
+        );
+
+        // With recency_weight = 0.8, the recent artifact should score higher.
+        let results_with_recency = store
+            .search_candidates(&taxonomies, &query, 10, 0.8, now)
+            .await
+            .unwrap();
+        assert_eq!(results_with_recency.len(), 2);
+        assert_eq!(results_with_recency[0].1, "recent");
+        assert!(
+            results_with_recency[0].2 > results_with_recency[1].2,
+            "recent artifact should score higher with recency_weight=0.8"
+        );
     }
 }

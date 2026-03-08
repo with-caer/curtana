@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use curtana_infers::TextEmbeddingModel;
 
 use crate::{
-    Artifact, BrowseOrder,
+    Artifact, BrowseOrder, Store,
     manifest::Manifest,
-    open_taxonomy_store,
+    open_source_store,
     router::{Router, ScoredArtifact},
     truncate_text,
 };
@@ -106,6 +106,15 @@ impl ToolExecutor {
         Self { manifest, data_dir }
     }
 
+    /// Looks up a taxonomy in the manifest, derives its source key, and opens
+    /// the corresponding source store.
+    async fn open_store_for_taxonomy(&self, taxonomy: &str) -> Result<Store, crate::Error> {
+        let entry = self.manifest.taxonomies.get(taxonomy).ok_or_else(|| {
+            crate::Error::DatabaseError(format!("unknown taxonomy: {taxonomy:?}"))
+        })?;
+        open_source_store(&self.data_dir, &entry.source_key()).await
+    }
+
     /// Validates common tool arguments. Returns `Some(error_message)` if invalid.
     fn validate_args(&self, args: &serde_json::Value) -> Option<String> {
         if let Some(top_k) = args.get("top_k").and_then(|v| v.as_u64())
@@ -122,6 +131,19 @@ impl ToolExecutor {
             && author.trim().is_empty()
         {
             return Some("author must be non-empty".to_string());
+        }
+        if let Some(rw) = args.get("recency_weight") {
+            match rw.as_f64() {
+                Some(v) if !(0.0..=1.0).contains(&v) => {
+                    return Some(format!(
+                        "recency_weight must be between 0.0 and 1.0, got {v}"
+                    ));
+                }
+                None => {
+                    return Some("recency_weight must be a number".to_string());
+                }
+                _ => {}
+            }
         }
         None
     }
@@ -161,22 +183,38 @@ impl ToolExecutor {
     }
 
     async fn list_taxonomies(&self) -> ToolResult {
-        let mut lines = Vec::new();
+        use std::collections::BTreeMap;
+
+        // Group taxonomies by source_key to open one store per source.
+        let mut groups: BTreeMap<String, Vec<(&String, &crate::manifest::TaxonomyEntry)>> =
+            BTreeMap::new();
         for (name, entry) in &self.manifest.taxonomies {
-            let store = match open_taxonomy_store(&self.data_dir, name).await {
+            groups
+                .entry(entry.source_key())
+                .or_default()
+                .push((name, entry));
+        }
+
+        let mut lines = Vec::new();
+        for (source_key, taxonomies) in &groups {
+            let store = match open_source_store(&self.data_dir, source_key).await {
                 Ok(s) => s,
                 Err(e) => {
-                    lines.push(format!("{name}: error ({e})"));
+                    for (name, _) in taxonomies {
+                        lines.push(format!("{name}: error ({e})"));
+                    }
                     continue;
                 }
             };
-            let count = store.count().await.unwrap_or(0);
-            let desc = if entry.description.is_empty() {
-                "(no description)"
-            } else {
-                &entry.description
-            };
-            lines.push(format!("{name}: {desc} ({count} items)"));
+            for (name, entry) in taxonomies {
+                let count = store.count(name).await.unwrap_or(0);
+                let desc = if entry.description.is_empty() {
+                    "(no description)"
+                } else {
+                    &entry.description
+                };
+                lines.push(format!("{name}: {desc} ({count} items)"));
+            }
         }
         ToolResult {
             text: if lines.is_empty() {
@@ -196,11 +234,11 @@ impl ToolExecutor {
                 sources: vec![],
             };
         }
-        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+        let store = match self.open_store_for_taxonomy(taxonomy).await {
             Ok(s) => s,
             Err(e) => return err_result(e),
         };
-        let count = match store.count().await {
+        let count = match store.count(taxonomy).await {
             Ok(c) => c,
             Err(e) => return err_result(e),
         };
@@ -218,6 +256,11 @@ impl ToolExecutor {
         let query = args["query"].as_str().unwrap_or("");
         let top_k = args["top_k"].as_u64().unwrap_or(10) as usize;
         let taxonomy = args["taxonomy"].as_str();
+        let recency_weight = args["recency_weight"].as_f64().unwrap_or(0.0) as f32;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         if query.is_empty() {
             return ToolResult {
@@ -233,11 +276,14 @@ impl ToolExecutor {
                     sources: vec![],
                 };
             }
-            let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+            let store = match self.open_store_for_taxonomy(taxonomy).await {
                 Ok(s) => s,
                 Err(e) => return err_result(e),
             };
-            let artifacts = match store.search(embed_model, query, top_k).await {
+            let artifacts = match store
+                .search(taxonomy, embed_model, query, top_k, recency_weight, now)
+                .await
+            {
                 Ok(a) => a,
                 Err(e) => return err_result(e),
             };
@@ -251,7 +297,10 @@ impl ToolExecutor {
                 .collect()
         } else {
             let router = Router::new(self.manifest.clone(), self.data_dir.clone());
-            match router.search(embed_model, query, top_k).await {
+            match router
+                .search(embed_model, query, top_k, recency_weight)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => return err_result(e),
             }
@@ -280,11 +329,11 @@ impl ToolExecutor {
             };
         }
 
-        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+        let store = match self.open_store_for_taxonomy(taxonomy).await {
             Ok(s) => s,
             Err(e) => return err_result(e),
         };
-        let artifacts = match store.browse(offset, limit, order).await {
+        let artifacts = match store.browse(taxonomy, offset, limit, order).await {
             Ok(a) => a,
             Err(e) => return err_result(e),
         };
@@ -320,11 +369,11 @@ impl ToolExecutor {
             };
         }
 
-        let store = match open_taxonomy_store(&self.data_dir, taxonomy).await {
+        let store = match self.open_store_for_taxonomy(taxonomy).await {
             Ok(s) => s,
             Err(e) => return err_result(e),
         };
-        let artifacts = match store.filter(author, after, before, limit).await {
+        let artifacts = match store.filter(taxonomy, author, after, before, limit).await {
             Ok(a) => a,
             Err(e) => return err_result(e),
         };
